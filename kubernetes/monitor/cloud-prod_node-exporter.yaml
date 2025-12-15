@@ -1,0 +1,56 @@
+# 用于云上CCE环境
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+    spec:
+      tolerations:
+        - key: app
+          operator: Exists
+          effect: NoSchedule
+        # Taints:             node.kubernetes.io/unschedulable:NoSchedule
+        - key: node.kubernetes.io/unschedulable
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+      - name: default-secret
+      containers:
+      - name: node-exporter
+        # image: swr.cn-east-2.myhuaweicloud.com/common-server/node-exporter:latest
+        image: 100.125.17.64:20202/common-server/node-exporter:latest
+        ports:
+        - containerPort: 9100
+          hostPort: 22580
+          name: node-exporter
+          protocol: TCP
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: root
+          mountPath: /rootfs
+          readOnly: true
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: root
+        hostPath:
+          path: /

@@ -1,0 +1,106 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blackbox-config
+  namespace: monitoring
+data:
+  blackbox.yml: |
+    modules:
+      http_2xx:  # http 监测模块
+        prober: http
+        timeout: 3s
+        http:
+          preferred_ip_protocol: "ip4"
+          # 修改请求头，默认可能是Go-http-client/1.1，有的安全设备会拦截，
+          headers:
+            User-Agent: "curl/7.29.0"
+      tcp_connect: # tcp 监测模块
+        prober: tcp
+      ping: # icmp 检测模块
+        prober: icmp
+        timeout: 3s
+        icmp:
+          preferred_ip_protocol: "ip4"
+      http_post_2xx:
+        prober: http
+        timeout: 3s
+        http:
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: '{}'
+      http_basic_auth:
+        prober: http
+        timeout: 3s
+        http:
+          method: POST
+          headers:
+            Host: "login.example.com"
+          basic_auth:
+            username: "username"
+            password: "mysecret"
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blackbox-exporter
+  template:
+    metadata:
+      labels:
+        app: blackbox-exporter
+    spec:
+      tolerations:
+        - key: app
+          operator: Exists
+          effect: NoSchedule
+        # Taints:             node.kubernetes.io/unschedulable:NoSchedule
+        - key: node.kubernetes.io/unschedulable
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+      - name: default-secret
+      dnsPolicy: "None"   # 设置 dnsPolicy 为 None 以使用自定义 DNS 设置
+      dnsConfig:
+        nameservers:
+          - "223.5.5.5" # 该IP为阿里云公共dns地址
+      containers:
+      - name: blackbox-exporter
+        # image: swr.cn-east-2.myhuaweicloud.com/common-server/blackbox-exporter
+        image: 100.125.17.64:20202/common-server/blackbox-exporter:latest
+        ports:
+        - containerPort: 9115
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        args:
+          - --config.file=/config/blackbox.yml
+      volumes:
+      - name: config
+        configMap:
+          name: blackbox-config
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackbox-exporter
+  namespace: monitoring
+spec:
+  ports:
+  - port: 12582
+    targetPort: 9115
+  selector:
+    app: blackbox-exporter
+  # 云正式存在LoadBalancer，使用LoadBalancer类型
+  type: LoadBalancer
+  loadBalancerIP: 172.16.0.167

@@ -1,0 +1,80 @@
+# 用于云上CCE环境
+# 貌似并不需要单独部署cadvisor，可以通过接口获取 /api/v1/nodes/${1}/proxy/metrics/cadvisor
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cadvisor
+  namespace: monitoring
+  labels:
+    app: cadvisor
+spec:
+  selector:
+    matchLabels:
+      app: cadvisor
+  template:
+    metadata:
+      labels:
+        app: cadvisor
+    spec:
+      tolerations:
+        - key: app
+          operator: Exists
+          effect: NoSchedule
+        # Taints:             node.kubernetes.io/unschedulable:NoSchedule
+        - key: node.kubernetes.io/unschedulable
+          operator: Exists
+          effect: NoSchedule
+      imagePullSecrets:
+      - name: default-secret
+      containers:
+      - name: cadvisor
+        securityContext:
+        # 特权容器
+          privileged: true
+        # image: swr.cn-east-2.myhuaweicloud.com/common-server/cadvisor:latest
+        image: 100.125.17.64:20202/common-server/cadvisor:latest
+        ports:
+        - containerPort: 8080
+          hostPort: 12581
+          name: cadvisor
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1G"
+          limits:
+            cpu: "1"
+            memory: "2G"
+        volumeMounts:
+        - name: root
+          mountPath: /rootfs
+          readOnly: true
+        - name: run
+          mountPath: /var/run
+          # 读写
+          readOnly: true
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+        - name: docker
+          mountPath: /var/lib/docker
+          readOnly: true
+        - name: disk
+          mountPath: /dev/disk
+          readOnly: true
+      volumes:
+      - name: root
+        hostPath:
+          path: /
+      - name: run
+        hostPath:
+          path: /var/run
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: docker
+        hostPath:
+          path: /var/lib/docker/
+      - name: disk
+        hostPath:
+          path: /dev/disk/

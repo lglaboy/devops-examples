@@ -1,0 +1,139 @@
+# BEGIN ANSIBLE MANAGED BLOCK
+---
+# 关闭多租户
+auth_enabled: false
+server:
+  http_listen_port: 3100
+  # http服务器读取超时
+  http_server_read_timeout: 600s
+  # http服务器写入超时
+  http_server_write_timeout: 600s
+  grpc_server_max_recv_msg_size: 104857600
+  grpc_server_max_send_msg_size: 104857600
+
+analytics:
+  reporting_enabled: false
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: memberlist
+
+ingester:
+  lifecycler:
+    #address: 127.0.0.1   #ingester地址, 默认为本机127.0.0.1,如果有多台server也可以写多个
+    ring:
+      kvstore:
+        store: memberlist  #使用内存做为ingester存储
+      replication_factor: 1
+    final_sleep: 0s
+  # 块的大小(以字节bytes为单位),262144
+  #chunk_block_size: 262144
+  # 用于块的压缩算法(gzip,lz4,snappy)
+  #chunk_encoding: snappy
+  # 在没有更新的情况下，块在内存中保留最长时间
+  chunk_idle_period: 1m
+  # 块刷新后，在内存中保留时间
+  #chunk_retain_period: 30s
+  wal:
+    # 允许写入wal
+    enabled: true
+    # 存储和恢复wal数据的目录, 默认/loki/wal
+    dir: /data/wal
+    # 是否在关机时将块刷新到长期存储
+    #flush_on_shutdown: true
+    # wal可以使用的最大内存大小
+    replay_memory_ceiling: 1GB
+    checkpoint_duration: 1m
+
+memberlist:
+  # 要加入集群的成员
+  join_members:
+    - loki-write.logging.svc.cluster.local
+    - loki-read.logging.svc.cluster.local
+#    - logging-loki-write
+#    - logging-loki-read
+  dead_node_reclaim_time: 30s
+  gossip_to_dead_nodes_time: 15s
+  left_ingesters_timeout: 30s
+  bind_addr: ['0.0.0.0']
+  bind_port: 7946
+  gossip_interval: 2s
+  max_join_backoff: 1m
+  max_join_retries: 10
+  min_join_backoff: 1s
+  # 如果此节点无法加入成员列表群集，请中止
+  abort_if_cluster_join_fails: false
+
+schema_config:
+  configs:
+    - from: 2022-09-01
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+
+# 配置多个可能使用索引和块的存储, 供schema_config中选择
+storage_config:
+    boltdb_shipper:
+      active_index_directory: /data/index
+      cache_location: /data/index_cache
+      shared_store: filesystem
+      cache_ttl: 24h
+    filesystem:
+      directory: /data/chunks
+
+limits_config:
+  # 查询返回的唯一系列最大值
+  max_query_series: 100000
+  retention_period: 168h         # 过期时间
+  per_stream_rate_limit: 30MB # 每个流每秒的最大字节速率
+  reject_old_samples: true      # 旧样品是否会被拒绝
+  reject_old_samples_max_age: 24h      # 拒绝旧样本的最大时限
+  enforce_metric_name: false
+  ingestion_rate_mb: 40 #每个用户每秒的采样率限制
+  # 限制每行日志最大值
+  # max_line_size: 30mb
+  # max_line_size_truncate: true
+
+compactor:
+  working_directory: /data/compactor
+  shared_store: filesystem
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+
+chunk_store_config:
+    # 限制可查询的回溯数据的时间
+    max_look_back_period: 168h
+
+query_range:
+    align_queries_with_step: true
+    # 单个请求的最大重试次数
+    max_retries: 5
+    cache_results: true
+    results_cache:
+      cache:
+        # We're going to use the in-process "FIFO" cache
+        enable_fifocache: true
+        fifocache:
+          max_size_bytes: 100MB
+          ttl: 24h
+          # size: 1024
+          # validity: 24h
+
+query_scheduler:
+  # 最大未完成请求数
+  max_outstanding_requests_per_tenant: 2048
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /data/rules
+# END ANSIBLE MANAGED BLOCK

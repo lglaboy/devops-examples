@@ -1,0 +1,110 @@
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    metallb.universe.tf/allow-shared-ip: 192.168.1.21
+  name: minio
+  namespace: local3-test # 指定命名空间
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: server
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9090
+      targetPort: 9090
+  type: LoadBalancer
+  loadBalancerIP: 192.168.1.21
+
+
+---
+# 在 metadata.namespace Kubernetes 命名空间中部署一个新的MinIO Pod
+#
+# `spec.containers[0].args` 包含在pod上运行的命令
+# `/data` 目录对应于 `spec.containers[0].volumeMounts[0].mountPath`
+# 该装载路径对应于Kubernetes HostPath，它将 `/data` 绑定到pod运行的工作节点上的本地驱动器或卷
+# 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: minio
+  name: minio
+  namespace: local3-test # 指定命名空间
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      priorityClassName: high-priority-4
+      imagePullSecrets:
+      - name: regcred
+      containers:
+      - name: minio
+        image: swr.cn-east-2.myhuaweicloud.com/common-server/minio:RELEASE.2023-09-07T02-05-02Z
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        args: 
+        - minio server /data --console-address :9090
+        env:
+        - name: MINIO_ROOT_USER
+          # 随机生成 cat /dev/urandom | head -1 | md5sum | head -c 20 | tr 'a-z' 'A-Z'
+          value: "752A3701BAAA04E9ED7E"
+        - name: MINIO_ROOT_PASSWORD
+          # 随机生成 openssl rand -base64 30
+          value: "i2jy8cnO2/+KjuAxu8baeBoM4nGJoajdztcGOnig"
+        volumeMounts:
+        - name: localtime
+          mountPath: /etc/localtime
+        - mountPath: /data
+          name: localvolume # 对应于“spec.volumes”持久卷
+        ports:
+        - containerPort: 9000
+          name: server
+        - containerPort: 9090
+          name: console
+        resources:
+          requests:
+            cpu: "0.5"
+            memory: "1G"
+          limits:
+            cpu: "1"
+            memory: "2G"
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+          periodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: k3s-localtest-003 # 指定与要在其上部署的工作节点关联的节点标签
+      volumes:
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+      - name: localvolume
+        hostPath: # MinIO通常建议使用本地连接的卷
+          path: /opt/project/project-middleware/local3-test/minio/data # 指定指向Kubernetes工作节点上的本地驱动器或卷的路径
+          type: DirectoryOrCreate # 最后一个目录的路径必须存在

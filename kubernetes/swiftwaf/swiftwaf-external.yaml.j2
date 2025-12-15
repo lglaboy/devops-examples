@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: swiftwaf-external
+spec:
+  selector:
+    matchLabels:
+      app: external-common
+  template:
+    metadata:
+      labels:
+        app: external-common
+        type: swiftwaf-external
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        svccontroller.k3s.cattle.io/lbpool: external
+      priorityClassName: middleware
+      containers:
+      - image: swr.cn-east-2.myhuaweicloud.com/common-server/swiftwaf:15
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 5
+          initialDelaySeconds: 10
+          periodSeconds: 300
+          successThreshold: 1
+          exec:
+            command:
+            - pgrep
+            - nginx
+          timeoutSeconds: 5
+        name: swiftwaf
+        ports:
+        - containerPort: 80
+          name: server
+        readinessProbe:
+          failureThreshold: 5
+          initialDelaySeconds: 10
+          periodSeconds: 60
+          successThreshold: 1
+          exec:
+            command:
+            - pgrep
+            - nginx
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2G
+          requests:
+            cpu: "0.05"
+            memory: 0.1G
+        volumeMounts:
+        - mountPath: /etc/hosts
+          name: hosts
+        - mountPath: /etc/localtime
+          name: localtime
+        - mountPath: /etc/nginx/conf.d
+          name: data
+        - mountPath: /etc/nginx/nginx.conf
+          name: conf
+        - mountPath: /var/log/nginx
+          name: logs
+      imagePullSecrets:
+      - name: regcred
+      volumes:
+      - hostPath:
+          path: /etc/hosts
+        name: hosts
+      - hostPath:
+          path: /etc/localtime
+        name: localtime
+      - hostPath:
+          path: /opt/middleware/{{ NAMESPACE }}/swiftwaf/conf.d
+        name: data
+      - hostPath:
+          path: /opt/middleware/{{ NAMESPACE }}/swiftwaf/nginx.conf
+        name: conf
+      - hostPath:
+          path: /opt/logs/{{ NAMESPACE }}/swiftwaf/logs
+        name: logs

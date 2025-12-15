@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: nacos-cluster
+  name: nacos-cluster-config
+  namespace: default
+data:
+  application.properties: |
+    # spring
+    server.servlet.contextPath=${SERVER_SERVLET_CONTEXTPATH:/nacos}
+    server.contextPath=/nacos
+    server.error.include-message=ALWAYS
+    server.port=${NACOS_APPLICATION_PORT:8848}
+    spring.datasource.platform=${SPRING_DATASOURCE_PLATFORM:""}
+    nacos.cmdb.dumpTaskInterval=3600
+    nacos.cmdb.eventTaskInterval=10
+    nacos.cmdb.labelTaskInterval=300
+    nacos.cmdb.loadDataAtStart=false
+
+    spring.datasource.platform=postgresql
+    spring.datasource.driver-class-name=org.postgresql.Driver
+    db.num=1
+    db.url.0=jdbc:postgresql://${PG_SERVICE_HOST}:${PG_SERVICE_PORT:5432}/${PG_SERVICE_DB_NAME}
+    db.user.0=${PG_SERVICE_USER}
+    db.password.0=${PG_SERVICE_PASSWORD}
+
+    #db.num=${MYSQL_DATABASE_NUM:1}
+    #db.url.0=jdbc:mysql://${MYSQL_SERVICE_HOST}:${MYSQL_SERVICE_PORT:3306}/${MYSQL_SERVICE_DB_NAME}?${MYSQL_SERVICE_DB_PARAM:characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false}
+    #db.url.1=jdbc:mysql://${MYSQL_SERVICE_HOST}:${MYSQL_SERVICE_PORT:3306}/${MYSQL_SERVICE_DB_NAME}?${MYSQL_SERVICE_DB_PARAM:characterEncoding=utf8&connectTimeout=1000&socketTimeout=3000&autoReconnect=true&useSSL=false}
+    #db.user=${MYSQL_SERVICE_USER}
+    #db.password=${MYSQL_SERVICE_PASSWORD}
+
+    ### The auth system to use, currently only 'nacos' is supported:
+    nacos.core.auth.system.type=${NACOS_AUTH_SYSTEM_TYPE:nacos}
+
+
+    ### The token expiration in seconds:
+    nacos.core.auth.default.token.expire.seconds=${NACOS_AUTH_TOKEN_EXPIRE_SECONDS:18000}
+
+    ### The default token:
+    nacos.core.auth.default.token.secret.key=${NACOS_AUTH_TOKEN:}
+
+    ### Turn on/off caching of auth information. By turning on this switch, the update of auth information would have a 15 seconds delay.
+    nacos.core.auth.caching.enabled=${NACOS_AUTH_CACHE_ENABLE:false}
+    nacos.core.auth.enable.userAgentAuthWhite=${NACOS_AUTH_USER_AGENT_AUTH_WHITE_ENABLE:false}
+    nacos.core.auth.server.identity.key=${NACOS_AUTH_IDENTITY_KEY:}
+    nacos.core.auth.server.identity.value=${NACOS_AUTH_IDENTITY_VALUE:}
+    server.tomcat.accesslog.enabled=${TOMCAT_ACCESSLOG_ENABLED:false}
+    server.tomcat.accesslog.pattern=%h %l %u %t "%r" %s %b %D
+    # default current work dir
+    server.tomcat.basedir=file:.
+    ## spring security config
+    ### turn off security
+    nacos.security.ignore.urls=${NACOS_SECURITY_IGNORE_URLS:/,/error,/**/*.css,/**/*.js,/**/*.html,/**/*.map,/**/*.svg,/**/*.png,/**/*.ico,/console-fe/public/**,/v1/auth/**,/v1/console/health/**,/actuator/**,/v1/console/server/**}
+    # metrics for elastic search
+    management.metrics.export.elastic.enabled=false
+    management.metrics.export.influx.enabled=false
+
+    nacos.naming.distro.taskDispatchThreadCount=10
+    nacos.naming.distro.taskDispatchPeriod=200
+    nacos.naming.distro.batchSyncKeyCount=1000
+    nacos.naming.distro.initDataRatio=0.9
+    nacos.naming.distro.syncRetryDelay=5000
+    nacos.naming.data.warmup=true
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nacos-cluster
+  namespace: default
+spec:
+  serviceName: nacos-cluster
+  selector:
+    matchLabels:
+      app: nacos-cluster
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: nacos-cluster
+    spec:
+      containers:
+        - name: nacos
+          image: 100.125.17.64:20202/common-server/nacos-server:1.4.6-pg
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8848
+              name: server
+          env:
+            - name: MODE
+              value: "cluster"
+            - name: PREFER_HOST_MODE
+              value: "hostname"
+            - name: NACOS_SERVERS
+              value: "nacos-cluster-0.nacos-cluster.default.svc.cluster.local:8848 nacos-cluster-1.nacos-cluster.default.svc.cluster.local:8848 nacos-cluster-2.nacos-cluster.default.svc.cluster.local:8848"
+            - name: NACOS_AUTH_TOKEN
+              value: "SecretKey012345678901234567890123456789012345678901234567890123456789"
+            - name: PG_SERVICE_HOST
+              value: "172.16.0.100"
+            - name: PG_SERVICE_PORT
+              value: "5432"
+            - name: PG_SERVICE_USER
+              value: "nacos"
+            - name: PG_SERVICE_PASSWORD
+              value: "q1w2e3r4"
+            - name: PG_SERVICE_DB_NAME
+              value: "nacos_config"
+          volumeMounts:
+            - name: nacos-cluster-config
+              mountPath: /home/nacos/conf/application.properties
+              subPath: application.properties
+          resources:
+            requests:
+              cpu: "0.05"
+              memory: "0.1G"
+            limits:
+              cpu: "1"
+              memory: "2G"
+          livenessProbe:
+            tcpSocket:
+              port: 8848
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+            periodSeconds: 60
+          readinessProbe:
+            tcpSocket:
+              port: 8848
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+            periodSeconds: 60
+      imagePullSecrets:
+        - name: default-secret
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: nacos-cluster-config
+          name: nacos-cluster-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nacos-cluster
+  namespace: default
+spec:
+  selector:
+    app: nacos-cluster
+  ports:
+    - port: 8848
+      name: server
+      targetPort: 8848
+  # 云正式存在LoadBalancer，使用LoadBalancer类型
+  type: LoadBalancer
+  loadBalancerIP: 172.16.0.167

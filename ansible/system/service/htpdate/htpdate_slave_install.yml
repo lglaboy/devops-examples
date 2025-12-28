@@ -1,0 +1,23 @@
+- name: install htpdate
+  remote_user: swift
+  hosts: htpdate-slave_host
+  gather_facts: False
+  vars:
+    service_name: htpdate
+    gateway_url: local-gateway:8080
+  tasks:
+    - name: get system codename
+      shell: lsb_release -c | awk '{print $NF}'
+      register: system_codename
+    - name: get system arch
+      shell: dpkg --print-architecture
+      register: system_arch
+    - name: scp source file
+      local_action: command scp /home/swift/packages/ubuntu/{{system_codename.stdout}}/{{service_name}}.tar {{ inventory_hostname }}:/tmp
+    - name: install packages
+      raw: cd /tmp/ && sudo rm -rf {{service_name}} && tar -xvf {{service_name}}.tar && cd {{service_name}} && sudo dpkg -i *.deb
+    - name: sync date
+      raw: sudo htpdate -s -t {{ gateway_url }}
+    - name: echo crontab
+      raw: (crontab -l;echo '01 * * * * sudo htpdate -s -t {{ gateway_url }}') |crontab
+

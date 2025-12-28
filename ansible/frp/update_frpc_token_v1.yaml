@@ -1,0 +1,14 @@
+# 更新frpc token
+# 实例： ansible-playbook -i hosts_frpc update_frpc_token.yaml -e "token=2222222 server_port=7000"
+- name: update frpc token
+  remote_user: swift
+  hosts: frpc_hosts
+  gather_facts: False
+
+  tasks:
+    - name: update frpc token
+      shell: sudo sed -e "/^token.*=/ctoken = {{ token }}" -e "/server_port.*=/cserver_port = {{ server_port }}" /etc/frp/frpc.ini -i.bak
+    - name: add restart frpc.service
+#      shell: nohup /bin/sh -c 'sleep 3m && sudo systemctl restart frpc.service && sleep 10s && systemctl status frpc.service |grep auto-restart && $(nohup /usr/bin/frpc -c /etc/frp/frpc.ini.bak &> /dev/null &)' > /tmp/frpc.log 2>&1 &
+      shell: nohup /bin/sh -c 'sleep 3m && sudo systemctl restart frpc.service && sleep 10s && systemctl status frpc.service |grep auto-restart && cd /etc/frp && sudo mv frpc.ini frpc.ini.error && sudo mv frpc.ini.bak frpc.ini && sudo systemctl restart frpc.service' > /tmp/frpc.log 2>&1 &
+# 避免意外，可以将修改后的错误文件保留，恢复原有配置。

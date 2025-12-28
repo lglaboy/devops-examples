@@ -1,0 +1,44 @@
+# 用于ansible-api容器内部被调用的文件
+- name: deploy_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+    # jobsName
+    # buildNum
+    # envName
+    # registryName
+    # dockerCpu
+    # dockerMem
+    # exposedPort
+
+  tasks:
+    - name: set docker image name 
+      set_fact:
+        docker_image: "{{ registryName|default(default_RegistryUrl) }}/cloudhos/{{ envName }}/2.0/{{ jobsName }}:{{ buildNum }}"
+        docker_job: "{{ registryName|default(default_RegistryUrl) }}/cloudhos/{{ envName }}/2.0/{{ jobsName }}"
+    - name: download image
+      shell: docker pull {{ registryName|default(default_RegistryUrl) }}/cloudhos/{{ envName }}/2.0/{{ jobsName }}:{{ buildNum }}
+      retries: 2
+      delay: 3
+      register: result
+      until: result.rc == 0
+
+    - name: delete container
+      shell: docker rm -f {{ jobsName }}
+      ignore_errors: True
+    - name: start container(exposedPort)
+      shell: docker run --cap-add=SYS_PTRACE -itd --name {{ jobsName }} -h localhost -p {{ exposedPort }}:8080 --cpus {{ dockerCpu }} -m {{ dockerMem }} --memory-swappiness=0 --restart=on-failure:3 -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/"{{ jobsName }}"/logs:/opt/logs --log-opt max-size=50m --log-opt max-file=2 -l basic.hostname="$(hostname)" -l basic.ip="$(hostname -I | awk '{print $1}')" {{ docker_image }}
+      when: exposedPort is defined and exposedPort != 'Null'
+    - name: start container
+      shell: docker run --cap-add=SYS_PTRACE -itd --name {{ jobsName }} -h localhost --cpus {{ dockerCpu }} -m {{ dockerMem }} --memory-swappiness=0 --restart=on-failure:3 -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/"{{ jobsName }}"/logs:/opt/logs --log-opt max-size=50m --log-opt max-file=2 -l basic.hostname="$(hostname)" -l basic.ip="$(hostname -I | awk '{print $1}')" {{ docker_image }}
+      when: exposedPort is defined and exposedPort == 'Null'
+    - name: chmod /opt/logs
+      shell: docker exec {{ jobsName }} chmod 777 /opt/logs
+    - name: delete old images
+      shell: docker images {{ docker_job }} | wc -l
+      register: images_num
+    - name: delete old images
+      shell: docker rmi -f $(docker images {{ docker_job }} -q | tail -n +3) || echo "Warning:\ The image cannot be forcibly deleted because the running container is in use."
+      when: images_num.stdout|int > 3

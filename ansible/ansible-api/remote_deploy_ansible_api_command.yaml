@@ -1,0 +1,59 @@
+# 用于ansible-api容器内部被调用的文件
+- name: pull_file
+  hosts: test
+  gather_facts: False
+  remote_user: swift
+  # 调用直接传递以下变量，以上级传递为主，用不到默认变量，一下命令可改可不改，如：{{ build_dir|default(default_build_dir) }}改为{{ build_dir }}
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    # - name: pull images
+    #   shell: echo {{ build_dir|default(default_build_dir) }} {{ devops_job_dir|default(default_devops_job_dir) }}  {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }} {{ RegistryUrl|default(default_RegistryUrl) }} > /tmp/test.txt
+    - name: download image
+      tags: deploy
+      shell: docker pull {{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }}
+      retries: 2
+      delay: 3
+      register: result
+      until: result.rc == 0
+      when: ( JobType != 'k8s-java' )
+
+# 启动镜像，因为设计服务较多，使用脚本启动
+# 脚本存放在/opt/ansible-api/目录下，如果映射到宿主机，那么可以从宿主机直接执行，涉及到一个问题，脚本和配置文件是否封装进容器，还是本地存储，将文件copy进去
+# 两种，应该都可以，将所有都封装进去比较好，但是又有一些文件需要进行操作，ansible无法直接远程，安装该api的时候应该如何安装？还是需要在机器上执行的
+# 先按照进行本地化存储的进行执行！
+# 能否全部写进该yml文件，不使用脚本
+
+# 192.168.1.200，容器内的/opt/ansible-api目录没有映射到本地，需要调整下
+    # - name: chmod script
+    #   file:
+    #     path: /opt/ansible-api/remote_BaseBuild.sh
+    #     mode: u+x
+    # - name: client_script
+    #   command: /opt/ansible-api/remote_BaseBuild.sh  {{ build_dir|default(default_build_dir) }} {{ devops_job_dir|default(default_devops_job_dir) }}  {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }} {{ RegistryUrl|default(default_RegistryUrl) }}
+
+# 先复制容器文件到/tmp
+# test
+    - name: copy script to host
+      shell: docker cp gifted_pascal:/opt/ansible-api/BaseBuild_remote.sh /tmp/BaseBuild_remote.sh
+    - name: chmod script
+      file:
+        path: /tmp/BaseBuild_remote.sh
+        mode: u+x
+    - name: client_script
+      command: /tmp/BaseBuild_remote.sh  {{ build_dir|default(default_build_dir) }} {{ devops_job_dir|default(default_devops_job_dir) }}  {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }} {{ RegistryUrl|default(default_RegistryUrl) }}

@@ -1,0 +1,92 @@
+# Date: 2023-04-17 18:07
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 连接压测主机，运行jmeter进行压力测试
+# Version: v1.0
+
+
+- name: run jmeter test
+  remote_user: swift
+  hosts: jmeter_host
+  gather_facts: False
+  tags: jmeter
+  vars:
+    jmeter_public_address: http://static.company.xxxxxxxxxxx.com:9090/jmeter/
+    jmeter_private_address: http://192.168.1.51/jmeter/
+  tasks:
+  - name: Judge whether the variable is defined
+    fail:
+      msg: "ansible-playbok -i hosts jmeter_http_request_test.yml -e jmeter_file='/tmp/健康检查接口.jmx'"
+    when: jmeter_file is not defined
+  - name: 检查文件类型
+    fail:
+      msg: "文件类型异常,请检查文件是否以 .jmx 结尾. {{jmeter_file}}"
+    when: '".jmx" not in jmeter_file'
+  # 创建jmeter测试机器
+  - name: create huawei-cloud ecs jmeter 
+    connection: local
+    shell: tools -t ecs -f create -j jmeter
+  - name: 设置定时关闭
+    connection: local
+    shell: |
+      if [ $(at -l|wc -l) -gt 0 ];then
+        for id in $(atq | awk '{print $1}');do
+          if [ $(at -c $id |grep -c "tools -t ecs -f delete -j jmeter") -eq 1 ];then
+            atrm $id
+            echo 'tools -t ecs -f delete -j jmeter' | at now + 30 minutes
+            exit 0
+          fi
+        done
+        echo 'tools -t ecs -f delete -j jmeter' | at now + 30 minutes
+      else
+        echo 'tools -t ecs -f delete -j jmeter' | at now + 30 minutes
+      fi
+  - name: 上传压测文件
+    connection: local
+    # shell: ssh-keygen -f "${HOME}/.ssh/known_hosts" -R "119.3.109.189" && scp {{ jmeter_file }} {{ inventory_hostname }}:/tmp
+    shell: scp {{ jmeter_file }} {{ inventory_hostname }}:/tmp
+    register: result
+    until: result['failed'] == false
+    retries: 6
+    delay: 30
+  - name: get date 
+    shell: date "+%Y%m%d%H%M%S"
+    register: local_date
+  - name: 替换报告粒度
+    shell: sed -i -e '$a jmeter.reportgenerator.overall_granularity=1000' -e '/^jmeter.reportgenerator.overall_granularity/d' /opt/jmeter/apache-jmeter-5.4.3/bin/user.properties warn=false
+  - name: 运行压测命令
+    shell: export JAVA_HOME=/opt/jdk1.8.0_221;jmeter_file={{jmeter_file}};file_name=${jmeter_file##*/};/opt/jmeter/apache-jmeter-5.4.3/bin/jmeter -n -t /tmp/${file_name} -l /tmp/${file_name%%.*}_{{local_date.stdout}}.jtl -e -o /tmp/${file_name%%.*}_{{local_date.stdout}}
+  - name: 将压测输出文件导到本地
+    connection: local
+    shell: |
+      jmeter_file={{jmeter_file}}
+      file_name=${jmeter_file##*/}
+      scp {{ inventory_hostname }}:/tmp/${file_name%%.*}_{{local_date.stdout}}.jtl /tmp/
+      scp -r {{inventory_hostname}}:/tmp/${file_name%%.*}_{{local_date.stdout}} /tmp/
+      # 将文件上传到sw上, 提供http访问
+      scp -r /tmp/${file_name%%.*}_{{local_date.stdout}} sw:/opt/nginx_web/jmeter/
+  - name: 压缩html报告
+    connection: local
+    shell: |
+      jmeter_file={{jmeter_file}}
+      file_name=${jmeter_file##*/}
+      cd /tmp/ && tar -czvf ${file_name%%.*}_{{local_date.stdout}}.tar.gz ${file_name%%.*}_{{local_date.stdout}}
+      # 上传压测报告，提供下载
+      scp /tmp/${file_name%%.*}_{{local_date.stdout}}.tar.gz sw:/opt/nginx_web/jmeter/
+  - name: 输出结果
+    connection: local
+    shell: |
+      jmeter_file={{jmeter_file}}
+      file_name=${jmeter_file##*/}
+      echo "压测日志文件(本地): /tmp/${file_name%%.*}_{{local_date.stdout}}.jtl ;
+      压测html报表(本地): /tmp/${file_name%%.*}_{{local_date.stdout}} ;
+      压测html报表tar.gz文件(本地): /tmp/${file_name%%.*}_{{local_date.stdout}}.tar.gz ;
+      压测报表访问地址(公网): {{jmeter_public_address}}${file_name%%.*}_{{local_date.stdout}}/index.html ;
+      压测报表访问地址(私网): {{jmeter_private_address}}${file_name%%.*}_{{local_date.stdout}}/index.html ;
+      压测报表下载地址(公网): {{jmeter_public_address}}${file_name%%.*}_{{local_date.stdout}}.tar.gz ;
+      压测报表下载地址(私网): {{jmeter_private_address}}${file_name%%.*}_{{local_date.stdout}}.tar.gz ;
+      "
+    register: local_info
+  - name: debug
+    debug:
+      msg: "{{ local_info.stdout }}"

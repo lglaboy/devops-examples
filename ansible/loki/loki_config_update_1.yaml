@@ -1,0 +1,119 @@
+# Date: 2023-05-16 15:24
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 修改loki和promtail的配置文件
+# Version: v1.0
+
+
+# 获取主机列表
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  # vars:
+  #   log_file: /tmp/nginx_server_name_check.csv
+  tasks:
+    # 初始化日志文件
+    # - name: 初始化日志文件
+    #   shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky|CLOUD" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: loki_docker_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # - name: debug
+    #   debug:
+    #     var: groups.loki_docker_hosts
+
+- name: loki config update
+  hosts: loki_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    loki_config: /opt/loki/loki/loki-config.yaml
+    promtail_config: /opt/promtail/promtail-config.yaml
+    loki_update_count: 0
+    promtail_update_count: 0
+  tasks:
+    # 判断主机是否有loki gatway容器
+    - name: Check to see if logging-loki-* is installed
+      shell: docker ps |grep -E "logging-loki-" -c|cat
+      register: loki_docker_register
+    # 判断主机是否有 promtail 容器
+    - name: Check to see if logging-promtail is installed
+      shell: docker ps |grep -E "logging-promtail" -c|cat
+      register: logging_promtail_register
+
+    - name: 检查 config 是否存在
+      stat:
+        path: "{{ loki_config }}"
+      register: loki_config_status
+      when: loki_docker_register['stdout']|int == 3
+
+    - name: 检查 promtail config 是否存在
+      stat:
+        path: "{{ promtail_config }}"
+      register: promtail_config_status
+      when: logging_promtail_register['stdout']|int == 1
+    # 判断配置是否修改
+    - name: 修改loki配置
+      shell: |
+        update_count=0
+        if [ $(grep -E -c 'retention_period: 24h ' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/retention_period: 24h /retention_period: 168h /g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'retention_period: 24h$' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/retention_period: 24h$/retention_period: 168h/g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'max_look_back_period: 24h ' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/max_look_back_period: 24h /max_look_back_period: 168h /g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'max_look_back_period: 24h$' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/max_look_back_period: 24h$/max_look_back_period: 168h/g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'ingestion_rate_mb: 4 ' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/ingestion_rate_mb: 4 /ingestion_rate_mb: 40 /g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'ingestion_rate_mb: 4$' {{ loki_config }}) -eq 1 ];then
+          sed -i 's/ingestion_rate_mb: 4$/ingestion_rate_mb: 40/g' {{ loki_config }}
+          let update_count++
+        fi
+        if [ $update_count -gt 0 ];then
+          docker restart logging-loki-write
+          docker restart logging-loki-read
+        fi
+      args:
+        executable: /bin/bash
+      when: 
+        - loki_docker_register['stdout']|int == 3
+        - loki_config_status.stat.isreg is defined
+
+    - name: 修改 promtail config 配置
+      shell: |
+        update_count=0
+        if [ $(grep -E -c 'readline_rate_enabled: true ' {{ promtail_config }}) -eq 1 ];then
+          sed -i 's/readline_rate_enabled: true /readline_rate_enabled: false /g' {{ promtail_config }}
+          let update_count++
+        fi
+        if [ $(grep -E -c 'readline_rate_enabled: true$' {{ promtail_config }}) -eq 1 ];then
+          sed -i 's/readline_rate_enabled: true$/readline_rate_enabled: false/g' {{ promtail_config }}
+          let update_count++
+        fi
+
+        if [ $update_count -gt 0 ];then
+          docker restart logging-promtail
+        fi
+      args:
+        executable: /bin/bash
+      when: 
+        - logging_promtail_register['stdout']|int == 1
+        - promtail_config_status.stat.isreg is defined

@@ -1,0 +1,112 @@
+# 用于调远程ansible-api接口的脚本
+- name: pull_file
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: yes
+  become_user: jenkins
+  become_method: sudo
+  tasks:
+    - name: pull
+      tags: deploy
+      shell: cd /var/lib/jenkins/devops/ && git pull
+
+- name: build_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: build # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - name: notified task starting
+      tags: build
+      command: /opt/tools/venv/bin/python /opt/tools/console.py -m alarm -t DingTalkBuild -i {{ job_name }} {{ build_num }} {{ env_name }} {{ node_name }} {{ git_branch }} {{ git_commit }}
+      when: ( env_name.split('-')[-1] == 'prod')
+    - name: build job
+      tags: build
+      command: /var/lib/jenkins/devops/BaseBuild.sh {{ build_dir }} {{ devops_job_dir }} {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }}  {{ default_RegistryUrl }}
+      retries: 2
+      delay: 3
+      register: result
+      until: result.rc == 0
+
+- name: deploy_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+    remote_deploy_yml: remote_deploy_ansible_api.yml # 远端执行yml文件名
+    sign_key: 对应的签名密钥                # 远端ansible-api的sign_key
+  tasks:
+    - name: get request sign string
+      shell: echo -n "{{ job_name }}{{ env_name }}{{ remote_deploy_yml }}{{ sign_key }}"|md5sum|cut -d ' ' -f1
+      register: check
+    - name: set request_sign_string var
+      set_fact:
+        request_sign_string: "{{ check.stdout }}"
+    - block:
+      - name: deploy(only AnsibleApiUrl)
+        shell: curl -X POST -s "{{ AnsibleApiUrl }}/playbook" -H 'cache-control:\ no-cache' -d '{"n":"{{ job_name }}","h":"{{ env_name }}","f":"remote_deploy_ansible_api.yml","s":"{{ request_sign_string }}","c":5,"jobsName":"{{ job_name }}","buildNum":"{{ build_num }}","envName":"{{ env_name }}","registryName":"{{ RegistryUrl|default(default_RegistryUrl) }}","dockerCpu":"{{ DockerCpu|default(default_DockerCpu) }}","dockerMem":"{{ DockerMem|default(default_DockerMem) }}","exposedPort":"{{ ExposedPort|default(default_ExposedPort) }}"}'
+        register: deploy_check1
+      - name: debug
+        debug:
+          msg: "{{ deploy_check1 }}"
+      - name: Check command execution failed
+        fail:
+          msg: "Error: 存在部署服务命令执行失败，请检查详细日志。"
+        when: "'{\"rc\":0' not in deploy_check1.stdout"
+      when: AnsibleApiUrl is defined and AnsibleApiHostName is undefined
+    - block:
+      - name: deploy(AnsibleApiUrl and AnsibleApiHostName defined)
+        shell: curl -X POST -s "{{ AnsibleApiUrl }}/{{ item }}/playbook" -H 'cache-control:\ no-cache' -d '{"n":"{{ job_name }}","h":"{{ env_name }}","f":"remote_deploy_ansible_api.yml","s":"{{ request_sign_string }}","c":5,"jobsName":"{{ job_name }}","buildNum":"{{ build_num }}","envName":"{{ env_name }}","registryName":"{{ RegistryUrl|default(default_RegistryUrl) }}","dockerCpu":"{{ DockerCpu|default(default_DockerCpu) }}","dockerMem":"{{ DockerMem|default(default_DockerMem) }}","exposedPort":"{{ ExposedPort|default(default_ExposedPort) }}"}'
+        with_items:
+          - "{{ AnsibleApiHostName }}"
+        register: deploy_check2
+      - name: debug
+        debug:
+          msg: "{{ deploy_check2 }}"
+      - name: Check command execution failed
+        fail:
+          msg: "Error: 存在部署服务命令执行失败，请检查详细日志。"
+        when: "'{\"rc\":0' not in item.stdout"
+        with_items:
+          - "{{ deploy_check2.results }}"
+      when: AnsibleApiUrl is defined and AnsibleApiHostName is defined
+# 单独执行，防止AnsibleApiUrl未定义，全部跳过，jenkins不报错
+    - name: check fail
+      fail: 
+        msg: "Error: AnsibleApiUrl变量未定义，请检查配置文件。"
+      when: AnsibleApiUrl is undefined
+
+# data使用默认的

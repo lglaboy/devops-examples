@@ -1,0 +1,26 @@
+# 安装ansible-api的脚本
+- name: install ansible-api docker
+  hosts: ansible_api_hosts
+  gather_facts: False
+  remote_user: swift
+  vars:
+    AK: XXXXXXXXXXXXXXXXXXXX
+    SK: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  tasks:
+    - name: scp ansible-api package to remote
+      local_action: command scp /home/swift/packages/ansible-api_v1.tar {{ inventory_hostname }}:/tmp
+    - name: import docker image
+      shell: docker load < /tmp/ansible-api_v1.tar
+    - name: copy config to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/ansible_api_conf/
+        dest: /tmp/ansible_api_conf
+    - name: start elasticsearch service
+      shell: docker run -itd -p 8765:8765 --name ansible-api --restart=unless-stopped -v /var/run/docker.sock:/var/run/docker.sock  swr.cn-east-2.myhuaweicloud.com/common-server/ansible-api:v1 ansible-api -c /opt/ansible-api/api.cfg
+    - name: copy profile to directory
+      shell: docker cp /tmp/ansible_api_conf/remote_deploy_ansible_api.yml ansible-api:/opt/ansible-api/
+    - name: add huawei image key
+      shell: printf {{ AK }} | openssl dgst -binary -sha256 -hmac {{ SK }} | od -An -vtx1 | sed 's/[ \n]//g' | sed 'N;s/\n//'
+      register: LOGING_KEY
+    - name: login huawei
+      shell: docker exec ansible-api bash -c "docker login -u cn-east-2@{{ AK }} -p {{ LOGING_KEY['stdout_lines'][0] }} swr.cn-east-2.myhuaweicloud.com"

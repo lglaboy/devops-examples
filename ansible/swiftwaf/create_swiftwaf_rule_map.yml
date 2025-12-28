@@ -1,0 +1,116 @@
+# Date: 2025-10-24 10:04
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 生成/更新 swiftwaf 规则列表
+# Version: v1.0
+
+# 多线程批量运行 -f 100
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/create_swiftwaf_rule_map.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky|CLOUD|SENTRY" | awk '{print $NF}' | grep APP-001 | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: tmp_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+    # 自定义添加主机
+    - add_host:
+        name: "{{ item }}"
+        group: tmp_hosts
+      loop:
+        - CLOUD-GATEWAY-001
+        # - CLOUD-GATEWAY-002
+
+- name: update swiftwaf rule map
+  hosts: tmp_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/create_swiftwaf_rule_map.csv
+  tasks:
+    - name: 检查目录是否存在
+      stat:
+        path: /etc/nginx/swiftwaf/conf_json
+      register: swiftwaf_rule_path
+      # 存在生成，不存在 pass
+    - block:
+      - name: 写入 Python 文件
+        copy:
+          dest: /tmp/create_rule_map.py
+          content: |
+            #!/usr/bin/env python3
+            # -*- coding:utf-8 -*-
+
+            import sys, io
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+            import json
+            import os
+            from pathlib import Path
+
+            # 输入文件夹路径，里面存放各个 json 文件
+            input_dir = Path("/etc/nginx/swiftwaf/conf_json")
+            # 输出文件路径
+            output_file = Path("/tmp/swiftwaf_rule_map_all.json")
+
+            all_entries = []
+
+            for json_file in input_dir.glob("*.json"):
+                mod_name = json_file.stem  # 文件名作为 mod
+                try:
+                    with open(str(json_file), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            # 给每个条目添加 mod 字段
+                            for item in data:
+                                item["mod"] = mod_name
+                                # 如果没有 desc，添加空字符串
+                                if "desc" not in item:
+                                    item["desc"] = ""
+                            all_entries.extend(data)
+                        else:
+                            print("Warning: {} 内容不是列表，已跳过".format(json_file))
+                except Exception as e:
+                    print("Error reading {}: {}".format(json_file,e))
+
+            # 写入输出文件
+            with open(str(output_file), "w", encoding="utf-8") as f:
+                json.dump(all_entries, f, ensure_ascii=False, indent=4)
+
+            print("聚合完成，共 {} 条记录，输出文件: {}".format(len(all_entries),output_file))
+      
+      - name: 执行 Python 文件
+        command: python3 /tmp/create_rule_map.py
+
+      - name: 删除 Python 文件
+        file:
+          path: /tmp/create_rule_map.py
+          state: absent
+
+      - name: 上传文件到静态服务器
+        connection: local
+        shell: scp -3 {{ inventory_hostname }}:/tmp/swiftwaf_rule_map_all.json CLOUD-PROM-001:/opt/grafana-logging/static/{{ inventory_hostname.split('-')[0] | lower }}-prod_rule_map.json
+
+      - name: 输出结果
+        local_action: shell echo "{{ inventory_hostname }},文件已上传" >> "{{ log_file }}"
+
+      when: swiftwaf_rule_path.stat.isdir is defined and swiftwaf_rule_path.stat.isdir
+
+    - name: 输出结果
+      local_action: shell echo "{{ inventory_hostname }},目录/etc/nginx/swiftwaf/conf_json不存在" >> "{{ log_file }}"
+      when:
+        - swiftwaf_rule_path.stat.isdir is undefined

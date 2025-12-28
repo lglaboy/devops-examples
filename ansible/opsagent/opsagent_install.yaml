@@ -1,0 +1,413 @@
+# Date: 2025-10-28 15:46
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署opsagent服务
+# Version: v1.0
+
+# 1.批量安装
+# ansible-playbook opsagent_install.yml
+# 2.指定单个环境安装
+# ansible-playbook opsagent_install.yml -e env_name='xxxxxxxx-prod'
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/opsagent:v1
+    local_image_file: opsagent_v1.tgz
+    log_file: /tmp/opsagent_install_info.csv
+    env_name: None
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+    # 生成打包文件
+    - name: 检查本地文件 /tmp/{{local_image_file}}
+      stat:
+        path: /tmp/{{local_image_file}}
+      register: image_file_status
+
+    - block:
+        - name: 本地下载镜像 {{docker_image}}
+          shell: docker pull {{docker_image}}
+        - name: 本地打包镜像 -> /tmp/{{local_image_file}}
+          shell: docker save {{docker_image}} | gzip > /tmp/{{local_image_file}}
+      when:
+        - image_file_status.stat.isreg is undefined
+
+    # 获取主机
+    - name: get all hosts
+      shell: |
+        if [ "{{ env_name }}" = "None" ]; then
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+        else
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+        fi
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: tmp_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 安装 opsagent
+- name: install opsagent
+  hosts: tmp_hosts
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/opsagent:v1
+    local_image_file: opsagent_v1.tgz
+    log_file: /tmp/opsagent_install_info.csv
+  tasks:
+    # 同时验证docker容器和docker服务是否存在
+    - name: Check to see if opsagent is installed
+      shell: timeout 10 docker ps -a --format {{ '{{' }}.Names{{ '}}' }} | grep -c "^opsagent$" | cat
+      register: container_register
+
+    # TODO: 检查端口是否占用
+
+    - block:
+        - name: Check opsagent image
+          shell: docker images |awk '{print $1":"$2}' | grep -c "^{{docker_image}}$" | cat
+          register: image_register
+
+        # 传包策略
+        - block:
+            # 从镜像仓库下载
+            - name: APP-001 机器下载镜像
+              shell: |
+                #!/bin/bash
+                set -e
+                if docker images |awk '{print $1":"$2}' |grep -c "^{{docker_image}}$" >/dev/null 2>&1; then
+                  :
+                else
+                  docker pull {{docker_image}}
+                  docker save {{docker_image}} | gzip > /tmp/{{local_image_file}}
+                fi
+              when: "'-APP-001' in inventory_hostname"
+
+            - name: 通过APP-001将下载镜像传输到目标机器
+              shell: |
+                #!/bin/bash
+                set -e
+                if test -f /tmp/{{local_image_file}}; then
+                  scp -o PasswordAuthentication=no -o StrictHostKeyChecking=no /tmp/{{local_image_file}} {{inventory_hostname}}:/tmp
+                fi
+              delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+              when: "'-APP-001' not in inventory_hostname"
+
+            - name: load image
+              shell: docker load -i /tmp/{{local_image_file}}
+          when: image_register['stdout']|int == 0
+          rescue:
+            # 从本地scp到目标主机
+            - name: scp image to remote
+              local_action: command scp -o PasswordAuthentication=no /tmp/{{local_image_file}} {{ inventory_hostname }}:/tmp
+            - name: load image
+              shell: docker load -i /tmp/{{local_image_file}}
+
+        - name: 创建目录
+          shell: |
+            if ! test -d /opt/opsagent;then mkdir /opt/opsagent -p;fi
+            if ! test -d /opt/opsagent/logs;then mkdir /opt/opsagent/logs -p;fi
+            if ! test -d /opt/opsagent/data;then mkdir /opt/opsagent/data -p;fi
+            if ! test -d /opt/opsagent/config;then mkdir /opt/opsagent/config -p;fi
+          ignore_errors: true
+          register: create_dir_status
+
+        - name: 创建目录(root权限)
+          become: yes
+          become_method: sudo
+          shell: |
+            if ! test -d /opt/opsagent;then mkdir /opt/opsagent -p;fi
+            if ! test -d /opt/opsagent/logs;then mkdir /opt/opsagent/logs -p;fi
+            if ! test -d /opt/opsagent/data;then mkdir /opt/opsagent/data -p;fi
+            if ! test -d /opt/opsagent/config;then mkdir /opt/opsagent/config -p;fi
+          when: create_dir_status.failed == true
+
+        # 获取docker api version
+        # docker version -f '{{.Server.APIVersion}}'
+        - name: get docker api version
+          shell: docker version -f {{ '{{' }}.Server.APIVersion{{ '}}' }}
+          register: docker_api_version
+
+        - name: 创建配置文件
+          copy:
+            content: |
+              # 服务配置
+              server:
+                addr: ":9808" # HTTP 服务地址
+                log:
+                  # 日志文件
+                  path: ./logs/opsagent.log
+                  # 日志级别 支持 debug info warn error ，默认 info
+                  level: info
+                  # 单个日志文件最大 MB
+                  max_size: 100
+                  # 保留的旧日志个数
+                  max_backups: 7
+                  # 保留天数
+                  max_age: 30
+                  # 是否压缩
+                  compress: true
+                  # 是否同时输出到控制台
+                  console: true
+                  # 日志格式：json 或 console
+                  format: json
+                # 持久化数据文件
+                data: "./data/state.json"
+
+              # docker 配置
+              docker:
+                # docker api 版本, 1.39
+                api_version: {{docker_api_version['stdout']}}
+
+              # 过滤容器日志配置
+              logging:
+                # 排除容器，不检查日志
+                excludes:
+                  # 排除自身，根据自己定义的opsagent容器名配置，因为自身日志会记录异常容器的日志
+                  - "opsagent"
+                  - "container1"
+                  - "container2"
+                filters:
+                  # 识别日志级别
+                  # severity 严重错误
+                  # normal    普通错误
+                  # third     第三方错误
+                  - level: "severity"
+                    # (?i) 表示忽略大小写，正则匹配
+                    # 内存溢出
+                    regex: [ "(?i)OutOfMemoryError", "(?i)panic" ]
+                    # 识别到异常日志的动作: log restart
+                    action: restart
+                    # 达到3条异常日志才触发重启
+                    threshold: 3
+                  - level: "normal"
+                    # 内部服务调用异常
+                    # 连接数据库连接池出现异常
+                    # host|dns解析失效异常
+                    # redis连接异常
+                    regex:
+                      - "(?i)SocketException|HttpServerErrorException"
+                      - "(?i)GetConnectionTimeoutException|idle-session timeout|DataSourceClosedException|PSQLException"
+                      - "(?i)UnknownHostException"
+                      - "JedisConnectionException"
+                    action: log
+                  - level: "third"
+                    # his webservice接口异常
+                    # 调用公网|第三方无响应接口异常
+                    regex: [ "(?i)Could not receive Message","(?i)SocketTimeoutException|ConnectTimeoutException|Read timed out" ]
+                    action: log
+
+              # 指标配置
+              metrics:
+                namespace: "opsagent"
+
+              # 自动重启unhealthy容器配置
+              autoheal:
+                # 检查间隔（s）
+                interval: 5
+                # 指数退避基本时间 s
+                base_backoff: 10
+                # 指数退避最大时间 s
+                maximum_backoff: 300
+                # 重置回退时间 s
+                reset_backoff: 600
+
+
+              # 重启限制
+              limit:
+                # 冷却时间
+                cooldown: 300s
+                # 限流窗口
+                window: 600s
+                # 限流窗口最大重启次数 N
+                max_restart: 3
+                # 重启失败指数退避设置
+                # 基数,比如 10s，那就是间隔 10s，20s，40s，80s，160s重启
+                backoff_base: 10s
+                # 最大重启次数 M
+                backoff_limit: 5
+
+            dest: /opt/opsagent/config/config.yml
+            mode: 0644
+          ignore_errors: true
+          register: create_config_file_status
+
+        - name: 创建配置文件(root)
+          become: yes
+          become_method: sudo
+          copy:
+            content: |
+              # 服务配置
+              server:
+                addr: ":9808" # HTTP 服务地址
+                log:
+                  # 日志文件
+                  path: ./logs/opsagent.log
+                  # 日志级别 支持 debug info warn error ，默认 info
+                  level: info
+                  # 单个日志文件最大 MB
+                  max_size: 100
+                  # 保留的旧日志个数
+                  max_backups: 7
+                  # 保留天数
+                  max_age: 30
+                  # 是否压缩
+                  compress: true
+                  # 是否同时输出到控制台
+                  console: true
+                  # 日志格式：json 或 console
+                  format: json
+                # 持久化数据文件
+                data: "./data/state.json"
+
+              # docker 配置
+              docker:
+                # docker api 版本, 1.39
+                api_version: {{docker_api_version['stdout']}}
+
+              # 过滤容器日志配置
+              logging:
+                # 排除容器，不检查日志
+                excludes:
+                  # 排除自身，根据自己定义的opsagent容器名配置，因为自身日志会记录异常容器的日志
+                  - "opsagent"
+                  - "container1"
+                  - "container2"
+                filters:
+                  # 识别日志级别
+                  # severity 严重错误
+                  # normal    普通错误
+                  # third     第三方错误
+                  - level: "severity"
+                    # (?i) 表示忽略大小写，正则匹配
+                    # 内存溢出
+                    regex: [ "(?i)OutOfMemoryError", "(?i)panic" ]
+                    # 识别到异常日志的动作: log restart
+                    action: restart
+                    # 达到3条异常日志才触发重启
+                    threshold: 3
+                  - level: "normal"
+                    # 内部服务调用异常
+                    # 连接数据库连接池出现异常
+                    # host|dns解析失效异常
+                    # redis连接异常
+                    regex:
+                      - "(?i)SocketException|HttpServerErrorException"
+                      - "(?i)GetConnectionTimeoutException|idle-session timeout|DataSourceClosedException|PSQLException"
+                      - "(?i)UnknownHostException"
+                      - "JedisConnectionException"
+                    action: log
+                  - level: "third"
+                    # his webservice接口异常
+                    # 调用公网|第三方无响应接口异常
+                    regex: [ "(?i)Could not receive Message","(?i)SocketTimeoutException|ConnectTimeoutException|Read timed out" ]
+                    action: log
+
+              # 指标配置
+              metrics:
+                namespace: "opsagent"
+
+              # 自动重启unhealthy容器配置
+              autoheal:
+                # 检查间隔（s）
+                interval: 5
+                # 指数退避基本时间 s
+                base_backoff: 10
+                # 指数退避最大时间 s
+                maximum_backoff: 300
+                # 重置回退时间 s
+                reset_backoff: 600
+
+
+              # 重启限制
+              limit:
+                # 冷却时间
+                cooldown: 300s
+                # 限流窗口
+                window: 600s
+                # 限流窗口最大重启次数 N
+                max_restart: 3
+                # 重启失败指数退避设置
+                # 基数,比如 10s，那就是间隔 10s，20s，40s，80s，160s重启
+                backoff_base: 10s
+                # 最大重启次数 M
+                backoff_limit: 5
+
+            dest: /opt/opsagent/config/config.yml
+            mode: 0644
+          when: create_config_file_status.failed == true
+
+        - name: create opsagent
+          shell: |
+            docker run -d --name opsagent \
+            -h $(hostname) \
+            --cpus 1 -m 2G \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            --restart=unless-stopped \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /opt/opsagent/config/:/opsagent/config/ \
+            -v /opt/opsagent/logs/:/opsagent/logs/ \
+            -v /opt/opsagent/data/:/opsagent/data/ \
+            -p 9808:9808 \
+            {{docker_image}} -c /opsagent/config/config.yml
+          ignore_errors: true
+          register: create_register
+
+        # 清理文件
+        - name: 删除本地文件 /tmp/{{local_image_file}}
+          file:
+            path: /tmp/{{local_image_file}}
+            state: absent
+
+        - name: 输出结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},opsagent 已部署,{{docker_api_version['stdout']}}" >> "{{ log_file }}"
+          when:
+            - create_register.rc == 0
+
+        - name: 输出结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},opsagent 部署失败(启动异常),{{docker_api_version['stdout']}}" >> "{{ log_file }}"
+          when:
+            - create_register.rc != 0
+
+      when:
+        - container_register['stdout']|int == 0
+
+    - name: 输出结果
+      connection: local
+      shell: echo "{{ inventory_hostname }},opsagent 已存在," >> "{{ log_file }}"
+      when:
+        - container_register['stdout']|int == 1
+
+# 清除镜像，避免升级后不更新
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/opsagent:v1
+    local_image_file: opsagent_v1.tgz
+    log_file: /tmp/opsagent_install_info.csv
+    env_name: None
+  tasks:
+    # 删除打包文件
+    - name: 检查本地文件 /tmp/{{local_image_file}}
+      stat:
+        path: /tmp/{{local_image_file}}
+      register: image_file_status
+
+    - name: 删除本地文件 /tmp/{{local_image_file}}
+      file:
+        path: /tmp/{{local_image_file}}
+        state: absent
+      when:
+        - image_file_status.stat.isreg is defined and image_file_status.stat.isreg

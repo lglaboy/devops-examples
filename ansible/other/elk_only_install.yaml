@@ -1,0 +1,111 @@
+- name: install elk
+  remote_user: swift
+  hosts: elk_only_host
+  gather_facts: False
+  tasks:
+    - name: get host ip
+      setup:
+        gather_subset:
+          - "network"
+      register: elk_es_result
+    - name: scp elasticsearch package to remote
+      local_action: command scp /home/swift/packages/elk/elasticsearch_7.3.2_elk.tar {{ inventory_hostname }}:/tmp
+    - name: copy config to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/elk_conf/es_conf/
+        dest: /tmp/es_conf
+    # - name: create home directory
+    #   shell: mkdir /opt/elasticsearch/data -p && sudo chmod 777 /opt/elasticsearch/data && sudo chown swift /opt/elasticsearch
+    - name: create home directory
+      file:
+        path: /opt/elasticsearch
+        state: directory
+        owner: swift
+        group: swift
+    - name: create home directory
+      file:
+        path: /opt/elasticsearch/data
+        state: directory
+        mode: 0777
+    - name: copy profile to directory
+      shell: cp -pr /tmp/es_conf/elasticsearch.yml /opt/elasticsearch/ && cp -pr /tmp/es_conf/jvm.options /opt/elasticsearch/
+    - name: import docker image
+      shell: docker load < /tmp/elasticsearch_7.3.2_elk.tar
+    - name: start elasticsearch service
+      shell: docker run --cap-add=SYS_PTRACE -itd --name local-es-log -v /opt/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml -v /opt/elasticsearch/jvm.options:/usr/share/elasticsearch/config/jvm.options -v /opt/elasticsearch/data:/usr/share/elasticsearch/data -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime --ulimit memlock=-1:-1 -e "bootstrap.memory_lock=true" --cpus 4 -m 4G --memory-swappiness=0 --restart=unless-stopped swr.cn-east-2.myhuaweicloud.com/common-server/elasticsearch:7.3.2
+    - name: add hosts resolution
+      shell: echo "\n# ELK_ES_HOST\n{{ elk_es_result['ansible_facts']['ansible_default_ipv4']['address'] }}    local-es-log" |sudo tee -a /etc/hosts
+    - name: scp "delete expired index script"
+      copy:
+        src: /home/swift/devops/Autoinstall/elk_conf/es_index_clean.sh
+        dest: /tmp/es_index_clean.sh
+    - name: copy delete expired index script
+      shell: cp -p /tmp/es_index_clean.sh /opt/elasticsearch/ && chmod +x /opt/elasticsearch/es_index_clean.sh
+    - name: add crontab，delete expired indexes
+      shell: (crontab -l;echo '00 2  * * * /bin/bash /opt/elasticsearch/es_index_clean.sh >> /tmp/del_elasticseatch_index.log 2>&1') |crontab
+
+    # kibana
+    - name: scp kibana package to remote
+      local_action: command scp /home/swift/packages/elk/kibana_7.3.2_elk.tar {{ inventory_hostname }}:/tmp
+    - name: import docker image
+      shell: docker load < /tmp/kibana_7.3.2_elk.tar
+    - name: start kibana service
+      shell: docker run --cap-add=SYS_PTRACE -itd --name kibana -h $(hostname) -p 5601:5601  --link local-es-log -e ELASTICSEARCH_HOSTS=http://local-es-log:9200 -v /etc/localtime:/etc/localtime --ulimit memlock=-1:-1 --cpus 2 -m 4G --memory-swappiness=0 --restart=unless-stopped swr.cn-east-2.myhuaweicloud.com/common-server/kibana:7.3.2
+    - name: copy config file to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/elk_conf/kibana_conf/export.ndjson
+        dest: /tmp/export.ndjson
+    - name: import objects to kibana
+      shell: sleep 60s && docker cp /tmp/export.ndjson kibana:/tmp/ && docker exec kibana curl -XPOST  "http://0.0.0.0:5601/api/saved_objects/_import?overwrite=true" -H "kbn-xsrf:\ true" --form file=@"/tmp/export.ndjson" -s
+
+    # logstash
+    - name: scp logstash package to remote
+      local_action: command scp /home/swift/packages/elk/logstash_7.3.2_elk.tar {{ inventory_hostname }}:/tmp
+    - name: cp config to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/elk_conf/logstash_conf/
+        dest: /tmp/logstash_conf
+    # - name: create home directory
+    #   shell: sudo mkdir -p /opt/logstash/conf/ && sudo mkdir -p /opt/logstash/data/ && sudo chown swift  /opt/logstash/ -R && sudo chmod 777 /opt/logstash/data/
+    - name: create home directory
+      file:
+        path: /opt/logstash
+        state: directory
+        owner: swift
+        group: swift
+    - name: create home directory conf
+      file:
+        path: /opt/logstash/conf
+        state: directory
+    - name: create home directory data
+      file:
+        path: /opt/logstash/data
+        state: directory
+        mode: 0777
+    - name: copy profile to directory
+      shell: cp -pr /tmp/logstash_conf/logstash.docker.yml /opt/logstash/conf/ && cp -pr /tmp/logstash_conf/logstash.nginx.yml /opt/logstash/conf/
+    - name: import docker image
+      shell: docker load < /tmp/logstash_7.3.2_elk.tar
+    - name: start logstash service
+      shell: docker run -itd --name logstash --link local-es-log --restart=unless-stopped -p 9201:9201 -p 9202:9202 -v /etc/localtime:/etc/localtime -v /opt/logstash/data:/usr/share/logstash/data -v /opt/logstash/conf:/usr/share/logstash/pipeline swr.cn-east-2.myhuaweicloud.com/common-server/logstash:7.3.2
+
+    # filebeat
+    - name: scp filebeat package to remote
+      local_action: command scp /home/swift/packages/elk/filebeat_7.3.2_elk.tar {{ inventory_hostname }}:/tmp
+    - name: cp config to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/elk_conf/filebeat_conf/
+        dest: /tmp/filebeat_conf
+    # - name: create home directory
+    #   shell: sudo mkdir /opt/filebeat && sudo chmod 777 /opt/filebeat
+    - name: create home directory
+      file:
+        path: /opt/filebeat
+        state: directory
+        mode: 0777
+    - name: copy profile to directory
+      shell: cp -pr /tmp/filebeat_conf/filebeat.docker.yml /opt/filebeat/
+    - name: import docker image
+      shell: docker load < /tmp/filebeat_7.3.2_elk.tar
+    - name: start filebeat service
+      shell: docker run -d --name=filebeat-docker --user=root -h $(hostname) --log-opt max-size=512m --log-opt max-file=3 --restart=unless-stopped -v /etc/hosts:/etc/hosts -v /opt/filebeat/filebeat.docker.yml:/usr/share/filebeat/filebeat.yml:ro -v /var/lib/docker/containers:/var/lib/docker/containers:ro -v /var/run/docker.sock:/var/run/docker.sock:ro -v /var/log/nginx/:/var/log/nginx/:ro swr.cn-east-2.myhuaweicloud.com/common-server/filebeat:7.3.2 filebeat -e -strict.perms=false

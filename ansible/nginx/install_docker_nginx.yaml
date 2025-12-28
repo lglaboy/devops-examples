@@ -1,0 +1,377 @@
+# Date: 2024-01-04 14:00
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署swiftwaf容器
+# Version: v1.0
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    local_log_file: /tmp/sync_nginx_host.log
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ local_log_file }} ];then mv {{ local_log_file }} {{ local_log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+- name: 内网nginx部署docker
+  hosts: SyncHost
+  remote_user: swift
+  gather_facts: False
+  vars:
+    internal_port: 8080
+    waf_image: swr.cn-east-2.myhuaweicloud.com/common-server/swiftwaf:1
+    download_image_name: docker_image_swiftwaf_1.tgz
+    local_log_file: /tmp/sync_nginx_host.log
+  tasks:
+    # 判断目标机器上镜像是否存在
+    - name: 检查 swiftwaf 镜像是否存在
+      shell: docker images |awk '{print $1":"$2}'|grep -c {{ waf_image }} | cat
+      register: check_waf_image
+    # 不存在，则将镜像copy到目标机器
+    # 传包
+    # copy较慢，但目标机器若有，能避免重复copy
+    # scp速度一般，受限于阿里云机器带宽，但若每次都复制，影响速度
+
+    # 通过app-001从公司访问，然后，通过app-001 传包到目标机器
+    - block:
+        # 从云上下载
+        # - name: download image for cloud http
+        #   shell: wget -q -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
+        #   delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        # 从镜像仓库下载
+        - name: download image for swr
+          shell: docker pull {{waf_image}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: save image to /tmp
+          shell: docker save {{waf_image}} > /tmp/{{download_image_name}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: scp image to remote
+          shell: scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{inventory_hostname}}:/tmp
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+      when: check_waf_image['stdout']|int == 0
+      rescue:
+        - name: scp image to remote
+          local_action: command scp -o PasswordAuthentication=no /home/swift/packages/{{download_image_name}} {{ inventory_hostname }}:/tmp
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+
+    # 创建容器
+    # 检查是否存在创建的容器
+    - name: 检查 swiftwaf 容器是否创建
+      shell: docker ps -a | awk '{print $NF}' | grep "^swiftwaf$" -c | cat
+      register: check_waf_container
+
+    # 不存在，则创建
+    # 判断挂载目录是否存在
+    # 创建容器
+    - name: 创建 swiftwaf 容器
+      shell: |
+        docker create -it --name swiftwaf \
+        --net=host \
+        --cpus 2 -m 4G \
+        --restart=unless-stopped \
+        --memory-swappiness=0 \
+        --log-opt max-size=512m \
+        --log-opt max-file=3 \
+        -v /etc/hosts:/etc/hosts \
+        -v /etc/localtime:/etc/localtime \
+        -v /etc/nginx/conf.d:/etc/nginx/conf.d \
+        -v /etc/nginx/ssl:/etc/nginx/ssl \
+        -v /var/log/nginx:/var/log/nginx \
+        {{ waf_image }}
+      when:
+        - check_waf_container['stdout']|int == 0
+    # 存在，则跳过
+
+    # 输出结果
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},swiftwaf容器已存在" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 1
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},swiftwaf容器已创建" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 0
+
+    # # 更新created的镜像
+    # # 对于容器存在的，判断是否状态为 created
+    # #  docker inspect swiftwaf --format={{.State.Status}}
+    # - name: 检查创建的容器状态
+    #   # 存在/etc/nginx/ssl不存在机器 && test -d /etc/nginx/ssl
+    #   shell: docker inspect swiftwaf --format={{ '{{' }}.State.Status{{ '}}' }}
+    #   register: container_status
+    #   when:
+    #     - check_waf_container['stdout']|int == 1
+    # # 如果是created，进行更新
+    # # 创建模板文件
+
+    # # 删除容器
+
+    # # 创建新的容器
+    # - name: 检查 nginx 模板文件是否存在
+    #   shell: test -f /etc/nginx/nginx.conf.template
+    #   register: check_nginx_conf_template
+    #   ignore_errors: true
+
+    # - block:
+    #     - name: 创建 nginx.conf.template 模板文件
+    #       become: yes
+    #       copy:
+    #         content: |
+    #           user www-data;
+    #           worker_processes auto;
+    #           worker_cpu_affinity  auto;
+    #           worker_rlimit_nofile 65535;
+
+    #           # ulimit -n 关联
+    #           pid /run/nginx.pid;
+
+    #           events {
+    #               use epoll;
+    #               accept_mutex off;
+    #               # 关闭惊群默认关闭
+    #               worker_connections 65535;
+    #               # multi_accept on;
+    #           }
+
+    #           # stream 模块
+    #           stream {
+    #               include /etc/nginx/conf.d/*.stream;
+    #               log_format proxy '$remote_addr [$time_local] '
+    #                           '$protocol $status $bytes_sent $bytes_received '
+    #                           '$session_time "$upstream_addr" '
+    #                           '"$upstream_bytes_sent" "$upstream_bytes_received" "$upstream_connect_time"';
+
+    #               access_log /var/log/nginx/tcp-access.log proxy ;
+    #               open_log_file_cache off;
+    #           }
+
+
+    #           http {
+    #               server_tokens off;
+
+    #               map $time_iso8601 $logdate {
+    #                   '~^(?<ymd>\d{4}-\d{2}-\d{2})' $ymd;
+    #                   # logdate为年月日
+    #                   default 'date-not-found';
+    #               }
+
+    #               map $http_upgrade $connection_upgrade {
+    #                   default upgrade;
+    #                   '' '';
+    #               }
+    #               vhost_traffic_status_zone shared:vhost_traffic_status:128m;
+    #               vhost_traffic_status_filter_by_host on;
+    #               vhost_traffic_status_filter_by_set_key $status $server_name;
+
+    #               proxy_set_header Country_Code $geoip2_country_code;
+    #               proxy_set_header City_Code $geoip2_city_name_en;
+
+    #               geoip2 /etc/nginx/GeoLite2/GeoLite2-Country.mmdb {
+    #                   auto_reload 5m;
+    #                   $geoip2_metadata_country_build metadata build_epoch;
+    #                   $geoip2_country_code source=$remote_addr country iso_code;
+    #                   $geoip2_country_name_en source=$remote_addr country names en;
+    #                   $geoip2_country_name_cn source=$remote_addr country names zh-CN;
+    #               }
+    #               geoip2 /etc/nginx/GeoLite2/GeoLite2-City.mmdb {
+    #                   auto_reload 5m;
+    #                   $geoip2_metadata_city_build metadata build_epoch;
+    #                   $geoip2_city_name_en source=$remote_addr city names en;
+    #                   $geoip2_city_name_cn source=$remote_addr city names zh-CN;
+    #                   $geoip2_data_city_code source=$remote_addr city geoname_id;
+    #               }
+    #               ### websocket 启动配置
+
+
+    #               open_log_file_cache max=1000 inactive=20s valid=1m min_uses=2;
+    #               # 将多个日志进行积累,达到一定量级后写入到磁盘,可以减少磁盘旋转,从而降低磁盘i/o,提升nginx能效
+    #               charset utf-8;
+
+    #               open_file_cache max=65535 inactive=60s;
+    #               # 建议和打开文件数一致，inactive 是指经过多长时间文件没被请求后删除缓存
+    #               # NGINX缓存将最近使用的文件描述符和相关元数据（如修改时间，大小等）存储在缓存中。缓存不会存储所请求文件的内容。
+    #               open_file_cache_min_uses 1;
+    #               # 在inactive时间 1 次没有请求就删除
+    #               open_file_cache_valid 60s;
+    #               # 这个是指多长时间检查一次缓存的有效信息
+    #               open_file_cache_errors on;
+
+    #               sendfile on;
+    #               tcp_nopush on;
+    #               tcp_nodelay on;
+    #               types_hash_max_size 2048;
+    #               variables_hash_max_size 4096;
+    #               variables_hash_bucket_size 2048;
+
+
+
+    #               include /etc/nginx/mime.types;
+    #               default_type  application/json;
+
+    #               ##
+    #               # SSL Settings
+    #               ##
+
+    #               ssl_protocols TLSv1.2; # Dropping SSLv3, ref: POODLE
+    #               ssl_prefer_server_ciphers on;
+
+    #               ##
+    #               # time Settings
+    #               ##
+    #               keepalive_timeout 30;
+    #               client_header_timeout 30;
+    #               client_body_timeout 30;
+    #               reset_timedout_connection on;
+    #               send_timeout 30;
+
+    #               ##
+    #               # Cache Settings
+    #               ##
+    #               client_max_body_size 10m;
+    #               client_body_buffer_size 5m;
+    #               client_header_buffer_size 16k;
+    #               #getconf PAGE_SIZE 查看系统分页 linux
+    #               server_names_hash_bucket_size 256;
+    #               large_client_header_buffers 10 128k;
+    #               proxy_headers_hash_max_size 51200;
+    #               proxy_headers_hash_bucket_size 6400;
+
+    #               proxy_cache_path /var/cache/nginx/proxy_cache_temp levels=1:2 keys_zone=static_cache:100m max_size=10g inactive=7d use_temp_path=off;
+
+
+    #               ##
+    #               # Logging Settings
+    #               ##
+    #               log_format                 main ' $http_appversion | $remote_addr | $remote_user | $time_local | $request | '
+    #                                                                 '$status | $body_bytes_sent | $http_referer | '
+    #                                                                 '$http_user_agent | $http_x_forwarded_for | $request_time | $upstream_response_time | $upstream_addr | $upstream_status | $http_host ';
+
+    #               log_format  jsonlog '{'
+    #                       '"http_host": "$http_host",'
+    #                       '"server_addr": "$server_addr",'
+    #                       '"remote_addr":"$remote_addr",'
+    #                       '"time_local":"$time_local",'
+    #                       '"request_method":"$request_method",'
+    #                       '"request":"$request",'
+    #                       '"uri":"$uri",'
+    #                       '"request_uri":"$request_uri",'
+    #                       '"status":$status,'
+    #                       '"body_bytes_sent":"$body_bytes_sent",'
+    #                       '"bytes_sent":$bytes_sent,'
+    #                       '"http_referer":"$http_referer",'
+    #                       '"http_user_agent":"$http_user_agent",'
+    #                       '"upstream_addr":"$upstream_addr",'
+    #                       '"upstream_status":"$upstream_status",'
+    #                       '"upstream_cache_status":"$upstream_cache_status",'
+    #                       '"http_x_forwarded_for ":"$http_x_forwarded_for",'
+    #                       '"swift_x_api_ver ":"$http_x_api_ver",'
+    #                       '"swift_x_hos_id ":"$http_x_hos_id",'
+    #                       '"swift_x_actual_user_id ":"$http_x_actual_user_id",'
+    #                       '"swift_x_serv_identity": "$http_x_serv_identity"'
+    #                       '"swift_request_no ":"$http_request_no",'
+    #                       '"upstream_response_time":"$upstream_response_time",'
+    #                       '"request_time":"$request_time",'
+    #                       '"x_api_token":"$arg_x_api_token",'
+    #                       '"geoip_country_code":"$geoip2_country_code",'
+    #                       '"geoip_city_name_en":"$geoip2_city_name_en",'
+    #                   '}';
+
+    #                   log_format json_analytics escape=json '{'
+    #                               '"msec": "$msec", ' # request unixtime in seconds with a milliseconds resolution
+    #                               '"connection": "$connection", ' # connection serial number
+    #                               '"connection_requests": "$connection_requests", ' # number of requests made in connection
+    #                               '"pid": "$pid", ' # process pid
+    #                               '"request_id": "$request_id", ' # the unique request id
+    #                               '"request_length": "$request_length", ' # request length (including headers and body)
+    #                               '"remote_addr": "$remote_addr", ' # client IP
+    #                               '"remote_user": "$remote_user", ' # client HTTP username
+    #                               '"remote_port": "$remote_port", ' # client port
+    #                               '"time_local": "$time_local", '
+    #                               '"time_iso8601": "$time_iso8601", ' # local time in the ISO 8601 standard format
+    #                               '"request": "$request", ' # full path no arguments if the request
+    #                               '"request_uri": "$request_uri", ' # full path and arguments if the request
+    #                               '"args": "$args", ' # args
+    #                               '"status": "$status", ' # response status code
+    #                               '"body_bytes_sent": "$body_bytes_sent", ' # the number of body bytes exclude headers sent to a client
+    #                               '"bytes_sent": "$bytes_sent", ' # the number of bytes sent to a client
+    #                               '"http_referer": "$http_referer", ' # HTTP referer
+    #                               '"http_user_agent": "$http_user_agent", ' # user agent
+    #                               '"http_x_forwarded_for": "$http_x_forwarded_for", ' # http_x_forwarded_for
+    #                               '"http_host": "$http_host", ' # the request Host: header
+    #                               '"server_name": "$server_name", ' # the name of the vhost serving the request
+    #                               '"request_time": "$request_time", ' # request processing time in seconds with msec resolution
+    #                               '"upstream": "$upstream_addr", ' # upstream backend server for proxied requests
+    #                               '"upstream_connect_time": "$upstream_connect_time", ' # upstream handshake time incl. TLS
+    #                               '"upstream_header_time": "$upstream_header_time", ' # time spent receiving upstream headers
+    #                               '"upstream_response_time": "$upstream_response_time", ' # time spend receiving upstream body
+    #                               '"upstream_response_length": "$upstream_response_length", ' # upstream response length
+    #                               '"upstream_cache_status": "$upstream_cache_status", ' # cache HIT/MISS where applicable
+    #                               '"ssl_protocol": "$ssl_protocol", ' # TLS protocol
+    #                               '"ssl_cipher": "$ssl_cipher", ' # TLS cipher
+    #                               '"scheme": "$scheme", ' # http or https
+    #                               '"request_method": "$request_method", ' # request method
+    #                               '"server_protocol": "$server_protocol", ' # request protocol, like HTTP/1.1 or HTTP/2.0
+    #                               '"pipe": "$pipe", ' # "p" if request was pipelined, "." otherwise
+    #                               '"gzip_ratio": "$gzip_ratio", '
+    #                               '"http_cf_ray": "$http_cf_ray",'
+    #                               '"geoip_country_code": "$geoip2_country_code"'
+    #                               '}';
+
+    #               access_log /var/log/nginx/access.log;
+    #               error_log /var/log/nginx/error.log;
+
+    #               ##
+    #               # Gzip Settings
+    #               ##
+    #               gzip_disable "msie6";
+    #               gzip               on;
+    #               gzip_min_length    1024;
+    #               gzip_comp_level    5;
+    #               gzip_buffers       8 16k;
+    #               gzip_http_version  1.0;
+    #               gzip_proxied       any;
+    #               gzip_types         text/plain application/javascript text/javascript application/x-javascript text/css;
+    #               gzip_vary          on;
+
+    #               # Virtual Host Configs
+    #               ##
+    #               include /etc/nginx/swiftwaf/conf/*.conf;
+    #               include /etc/nginx/conf.d/*.conf;
+    #           }
+    #         dest: /etc/nginx/nginx.conf.template
+    #     # 删除容器
+    #     - name: 删除 swiftwaf 容器
+    #       shell: docker rm -f swiftwaf
+
+    #     # 创建新的容器
+    #     - name: 创建 swiftwaf 容器
+    #       shell: |
+    #         docker create -it --name swiftwaf \
+    #         --net=host \
+    #         --cpus 2 -m 4G \
+    #         --restart=unless-stopped \
+    #         --memory-swappiness=0 \
+    #         --log-opt max-size=512m \
+    #         --log-opt max-file=3 \
+    #         -v /etc/hosts:/etc/hosts \
+    #         -v /etc/localtime:/etc/localtime \
+    #         -v /etc/nginx/nginx.conf:/etc/nginx/nginx.conf \
+    #         -v /etc/nginx/conf.d:/etc/nginx/conf.d \
+    #         -v /etc/nginx/ssl:/etc/nginx/ssl \
+    #         -v /var/log/nginx:/var/log/nginx \
+    #         {{ waf_image }}
+
+    #   when:
+    #     - check_waf_container['stdout']|int == 1
+    #     - container_status.stdout == "created"
+    #     - check_nginx_conf_template.rc != 0

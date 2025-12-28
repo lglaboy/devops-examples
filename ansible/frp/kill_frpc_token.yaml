@@ -1,0 +1,13 @@
+- name: kill frpc token
+  remote_user: swift
+  hosts: frpc_hosts
+  gather_facts: False
+
+  tasks:
+    - name: kill restart frpc.service
+      shell: kill -9 $(ps -ef |grep "sh -c sleep"|grep -v grep |awk '{print $2}')
+#      ignore
+    - name: rollback frpc token
+      shell: mv /etc/frp/frpc.ini.bak /etc/frp/frpc.ini
+      become: yes
+      become_user: root

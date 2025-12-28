@@ -1,0 +1,30 @@
+# 检查postgresql数据库主备机器
+- name: 检查postgresql数据库主备机器
+  remote_user: swift
+  hosts: check_pg_master_slave_host
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_pg_master_slave.csv
+  tasks:
+    - name: 检查是否存在postgresql进程
+      shell: ps -ef |grep -v grep |grep postgresql -c
+      register: postgresql_register
+      ignore_errors: True
+    - block:
+      - name: 检查是否存在walwriter进程,为主库
+        shell: ps -ef |grep -v grep |grep walwriter
+        register: pg_master_register
+        ignore_errors: True
+      - name: 检查是否存在walreceiver进程,为备库
+        shell: ps -ef|grep -v grep |grep walreceiver
+        register: pg_slave_register
+        ignore_errors: True
+      - name: output info to local
+        #local_action: shell echo "{{ inventory_hostname }}" > "{{ log_file }}_{{ inventory_hostname|lower }}" && echo "{{ postgresql_registe.stdout }}" >> "{{ log_file }}_{{ inventory_hostname|lower }}"
+        local_action: shell echo "{{ inventory_hostname }},主库,{{ pg_master_register.stdout }},{{ pg_slave_register.stdout }}" >> "{{ log_file }}"
+        when: pg_master_register.rc|int == 0
+      - name: output info to local
+        #local_action: shell echo "{{ inventory_hostname }}" > "{{ log_file }}_{{ inventory_hostname|lower }}" && echo "{{ postgresql_registe.stdout }}" >> "{{ log_file }}_{{ inventory_hostname|lower }}"
+        local_action: shell echo "{{ inventory_hostname }},备库,{{ pg_master_register.stdout }},{{ pg_slave_register.stdout }}" >> "{{ log_file }}"
+        when: pg_slave_register.rc|int == 0
+      when: postgresql_register['stdout']|int >= 1

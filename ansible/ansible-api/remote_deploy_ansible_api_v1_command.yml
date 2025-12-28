@@ -1,0 +1,37 @@
+# 用于ansible-api容器内部被调用的文件
+- name: pull_file
+  hosts: ansible_api_hosts
+  gather_facts: False
+  remote_user: swift
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - name: download image
+      tags: deploy
+      shell: docker pull {{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }}
+      retries: 2
+      delay: 3
+      register: result
+      until: result.rc == 0
+      when: ( JobType != 'k8s-java' )
+    - name: chmod script
+      file:
+        path: /opt/ansible-api/BaseBuild_remote.sh
+        mode: u+x
+    - name: client_script
+      command: /opt/ansible-api/BaseBuild_remote.sh {{ build_dir|default(default_build_dir) }} {{ devops_job_dir|default(default_devops_job_dir) }}  {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }} {{ RegistryUrl|default(default_RegistryUrl) }}

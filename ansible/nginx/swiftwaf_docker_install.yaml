@@ -1,0 +1,247 @@
+# Date: 2024-05-10 11:23
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署swiftwaf容器
+# Version: v1.0
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    local_log_file: /tmp/install_swiftwaf.log
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ local_log_file }} ];then mv {{ local_log_file }} {{ local_log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+- name: 部署docker版本swiftwaf
+  hosts: swiftwaf_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    internal_port: 8080
+    waf_image: swr.cn-east-2.myhuaweicloud.com/common-server/swiftwaf:k3s-1
+    download_image_name: docker_image_swiftwaf_k3s-1.tgz
+    local_log_file: /tmp/install_swiftwaf.log
+    dump_host: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+  tasks:
+    # 判断目标机器上镜像是否存在
+    - name: 检查 swiftwaf 镜像是否存在
+      shell: docker images |awk '{print $1":"$2}'|grep -c {{ waf_image }} | cat
+      register: check_waf_image
+    # 不存在，则将镜像copy到目标机器
+    # 传包
+    # copy较慢，但目标机器若有，能避免重复copy
+    # scp速度一般，受限于阿里云机器带宽，但若每次都复制，影响速度
+
+    # 通过app-001从公司访问，然后，通过app-001 传包到目标机器
+    - block:
+        # 从云上下载
+        # - name: download image for cloud http
+        #   shell: wget -q -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
+        #   delegate_to: "{{ dump_host }}"
+
+        # 从镜像仓库下载
+        - name: 测试 delegate_to 主机 {{ dump_host }} 是否可连接
+          ping:
+          delegate_to: "{{ dump_host }}"
+          register: ping_result
+          ignore_unreachable: true
+
+        - name: 检查 delegate_to 主机是否可连接
+          fail:
+            msg: "{{ dump_host }} 主机连接失败"
+          when:
+            - ping_result.unreachable is defined
+            - ping_result.unreachable == true
+
+        - name: download image for swr
+          shell: docker pull {{waf_image}}
+          delegate_to: "{{ dump_host }}"
+
+        - name: save image to /tmp
+          shell: docker save {{waf_image}} > /tmp/{{download_image_name}}
+          delegate_to: "{{ dump_host }}"
+
+        - name: scp image to remote
+          shell: scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{inventory_hostname}}:/tmp
+          delegate_to: "{{ dump_host }}"
+
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+      rescue:
+        # 减少依赖，比直接传本地 /home/swift/packages/{{download_image_name}} 中的包强，不需要提前打包，准备
+        # 从镜像仓库下载
+        - name: download image for swr
+          local_action: shell docker pull {{waf_image}}
+
+        - name: save image to /tmp
+          local_action: shell docker save {{waf_image}} | gzip > /tmp/{{download_image_name}}
+
+        - name: scp image to remote
+          # PasswordAuthentication=no 禁止使用密码，防止卡在输入密码
+          local_action: command scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{ inventory_hostname }}:/tmp
+
+        - name: delete tmp {{download_image_name}} package
+          local_action: shell rm -rf /tmp/{{download_image_name}}
+
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+      when: check_waf_image['stdout']|int == 0
+
+    - name: 检查 swiftwaf 容器是否创建
+      shell: docker ps -a | awk '{print $NF}' | grep "^swiftwaf$" -c | cat
+      register: check_waf_container
+
+    # 不存在，则创建
+    - block:
+        # 创建容器
+        - name: 创建 swiftwaf 容器
+          shell: |
+            docker run -itd --name swiftwaf \
+            --net=host \
+            --cpus 2 -m 4G \
+            --restart=unless-stopped \
+            --memory-swappiness=0 \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /etc/nginx/conf.d:/etc/nginx/conf.d \
+            -v /etc/nginx/ssl:/etc/nginx/ssl \
+            -v /var/log/nginx:/var/log/nginx \
+            {{ waf_image }}
+        - name: 创建 nginx 可执行文件
+          become: yes
+          copy:
+            content: |
+              #!/bin/bash
+
+              # 更新configmap
+              update_configmap() {
+                  local external_update internal_update
+                  external_update="$HOME/k3s-yamls/nginx/external/update.sh"
+                  internal_update="$HOME/k3s-yamls/nginx/internal/update.sh"
+                  # 判断脚本是否存在
+                  if [[ -f $external_update ]]; then
+                      cd "$(dirname "$external_update")" || echo "$(dirname "$external_update") 目录不存在"
+                      echo "更新 external(外网) nginx配置"
+                      sudo bash update.sh
+                  else
+                      echo "$external_update 文件不存在"
+                  fi
+
+                  if [[ -f $internal_update ]]; then
+                      cd "$(dirname "$internal_update")" || echo "$(dirname "$internal_update") 目录不存在"
+                      echo "更新 internal(内网) nginx配置"
+                      sudo bash update.sh
+                  else
+                      echo "$internal_update 文件不存在"
+                  fi
+                  # 更新configmap pod内部配置同步存在延迟, 添加等待配置同步
+                  sleep 3
+              }
+
+              # k8s environment
+              run_k8s_swiftwaf() {
+                  local name="swiftwaf"
+
+                  # 执行命令前判断是否更新配置文件
+                  if [[ $1 == "-t" ]]; then
+                      update_configmap
+                  elif [[ "$1 $2" == "-s reload" ]]; then
+                      run_k8s_swiftwaf "-t"
+                  fi
+
+                  for pod in $(kubectl get pods | grep "$name" | cut -d" " -f 1); do
+                      echo "$pod"
+                      kubectl exec "$pod" -- nginx "$@" || {
+                          exit 1
+                      }
+                  done
+                  return 0
+              }
+
+              # docker environment
+              run_docker_swiftwaf() {
+                  local name="swiftwaf"
+
+                  docker exec "$name" nginx "$@" || {
+                      exit 1
+                  }
+              }
+
+              # 控制器
+              run_swiftwaf() {
+                  local name="swiftwaf"
+
+                  if [[ $(docker ps | awk '{print $NF}' | grep "^$name$" -c) -eq 1 ]]; then
+                      echo "Docker environment execution"
+                      run_docker_swiftwaf "$@"
+                  elif [[ $(kubectl get pods | awk '{print $1}' | grep swiftwaf -c) -gt 0 ]]; then
+                      echo "k8s environment execution"
+                      run_k8s_swiftwaf "$@"
+                  fi
+              }
+
+              main() {
+
+                  case "$#" in
+                  1)
+                      case "$1" in
+                      -t)
+                          # 处理 -t 或 -V 的情况
+                          run_swiftwaf "$@"
+                          ;;
+                      -V)
+                          # 处理 -t 或 -V 的情况
+                          run_swiftwaf "$@"
+                          ;;
+                      *)
+                          # 处理其他 1 个参数的情况
+                          ;;
+                      esac
+                      ;;
+                  2)
+                      case "$1 $2" in
+                      "-s reload")
+                          # 处理 -s reload 的情况
+                          run_swiftwaf "$@"
+                          ;;
+                      *)
+                          # 处理其他 2 个参数的情况
+                          ;;
+                      esac
+                      ;;
+                  *)
+                      # 处理其他不同数量参数的情况
+                      # 说明
+                      echo "Control swiftwaf pod in k3s
+
+                  Options:
+                  -V            : show version and configure options then exit
+                  -t            : test configuration and exit
+                  -s signal     : send signal to a master process: reload
+                  "
+                      ;;
+                  esac
+              }
+
+              main "$@"
+
+            dest: /usr/local/bin/nginx
+            mode: 0755
+      when:
+        - check_waf_container['stdout']|int == 0
+
+    # 存在，则跳过
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},swiftwaf容器已存在" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 1
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},swiftwaf容器已创建" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 0

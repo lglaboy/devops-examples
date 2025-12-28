@@ -1,0 +1,55 @@
+# Date: 2025-03-31 11:15
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查所有APP-001主机，k3s环境，docker环境，service环境，swiftwaf是否存在
+# Version: v1.0
+
+# 多线程批量运行 -f 100
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_k3s_list.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky|CLOUD|SENTRY" | awk '{print $NF}' | grep APP-001 | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: tmp_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: check k3s middleware config
+  hosts: tmp_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_k3s_list.csv
+  tasks:
+    - name: 检查是否是k3s环境
+      shell: kubectl get nodes
+      ignore_errors: true
+      register: kubectl_status
+
+    - name: 检查service服务nginx是否启动
+      shell: systemctl is-active nginx
+      ignore_errors: true
+      register: nginx_status
+
+    - name: 检查docker服务swiftwaf是否启动
+      shell: docker ps | awk '{print $NF}'|grep "^swiftwaf$" -c | cat
+      ignore_errors: true
+      register: swiftwaf_status
+
+
+    - name: 输出结果
+      local_action: shell echo "{{ inventory_hostname }},kubectl执行 {{ kubectl_status.rc }},nginx service状态 {{nginx_status.stdout}},docker启动swiftwaf {{swiftwaf_status.stdout}}" >> "{{ log_file }}"

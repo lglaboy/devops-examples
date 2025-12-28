@@ -1,0 +1,42 @@
+# Date: 2022-11-22 14:22
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 卸载loki
+# Version: v1.0
+- name: uninstall loki
+  hosts: loki_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: Check to see if loki is installed
+      shell: docker ps |grep -E "logging-loki-(read|write|gateway)" -c|cat
+      register: loki_docker_register
+    - name: 检查network是否存在
+      shell: docker network ls|grep logging -c|cat
+      register: loki_network_register
+      ignore_errors: True
+    - name: 检查目录是否存在
+      stat:
+        path: /opt/loki
+      register: loki_path
+    - block:
+      - name: 删除gateway容器
+        shell: docker rm -f logging-loki-gateway
+      - name: 删除read容器
+        shell: docker rm -f logging-loki-read
+      - name: 删除write容器
+        shell: docker rm -f logging-loki-write
+      - name: 删除network
+        shell: docker network rm logging 
+        when:
+          loki_network_register['stdout']|int == 1
+      - name: 删除目录
+        become: yes
+        become_method: sudo
+        file:
+          path: /opt/loki
+          state: absent
+        when:
+          loki_path.stat.isdir is defined
+      when: 
+        - loki_docker_register['stdout']|int == 3

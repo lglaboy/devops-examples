@@ -1,0 +1,79 @@
+# Date: 2025-02-21 10:58
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 全局更新，存在cadvisor的主机进行更新
+# Version: v1.0
+
+# Example:
+# 1.批量更新所有主机
+# ansible-playbook update.yml
+# 2.更新指定环境主机
+# ansible-playbook update.yml -e env_name='xxxxxxxx-prod'
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/cadvisor_update_info.csv
+    env_name: None
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+    # 获取主机
+    - name: get all hosts
+      shell: |
+        if [ "{{ env_name }}" = "None" ]; then
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+        else
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+        fi
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: update_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 更新
+- name: update cadvisor
+  hosts: update_hosts
+  gather_facts: False
+  vars:
+    log_file: /tmp/cadvisor_update_info.csv
+  tasks:
+    - name: Check to see if cadvisor is installed
+      shell: timeout 10 docker ps |awk '{print $NF}'|grep -c ^cadvisor$ | cat
+      register: check_container_register
+
+    - block:
+        - name: delete cadvisor
+          shell: docker rm -f cadvisor
+
+        - name: create cadvisor
+          shell: |
+            docker run -itd --name cadvisor \
+            --privileged=true \
+            -p 12581:8080 \
+            --cpus 1 -m 1G \
+            --log-opt max-size=512m --log-opt max-file=3 \
+            --restart=unless-stopped \
+            -v /:/rootfs:ro \
+            -v /var/run:/var/run:rw \
+            -v /sys:/sys:ro \
+            -v /var/lib/docker/:/var/lib/docker:ro \
+            -v /dev/disk/:/dev/disk:ro \
+            swr.cn-east-2.myhuaweicloud.com/common-server/cadvisor:latest -housekeeping_interval=1m0s -docker_only=true
+        - name: 输出结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},cadvisor已更新" >> "{{ log_file }}"
+      when:
+        - check_container_register['stdout']|int == 1
+
+    - name: 输出结果
+      connection: local
+      shell: echo "{{ inventory_hostname }},cadvisor不存在" >> "{{ log_file }}"
+      when:
+        - check_container_register['stdout']|int == 0

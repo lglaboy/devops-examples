@@ -1,0 +1,126 @@
+# Date: 2023-02-07 16:18
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 修改loki的网关配置文件,添加prmetheus相关接口转发
+# Version: v1.0
+
+
+# # 获取主机列表
+# - name: Get host IP address
+#   hosts: localhost
+#   connection: local
+#   gather_facts: False
+#   tasks:
+#     # 判断主机是否有loki gatway容器
+#     - name: Check to see if logging-loki-gateway is installed
+#       shell: grep -E "Host\s+" /etc/ssh/ssh_config | egrep '\-APP-|-MQ-|-SYNC-|-PG-|-HIS-|JDYFY-|LOCAL-COMMON-|Y-001' | egrep -v '\*|#|TEST|DEV|CLOUD' | awk '{print $2}'
+#       register: loki_docker_register
+#     - meta: refresh_inventory
+
+
+- name: loki config update
+  hosts: loki_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    # 判断主机是否有loki gatway容器
+    - name: Check to see if logging-loki-gateway is installed
+      shell: docker ps |grep -E "logging-loki-gateway" -c|cat
+      register: loki_docker_register
+    # 判断主机是否有gateway配置文件
+    - name: 检查gateway config是否存在
+      stat:
+        path: /opt/loki/config/nginx-loki-gateway.conf
+      register: loki_gatway_config
+    - block:
+      # 判断配置是否修改
+      - name: 检查 prom api location是否存在
+        shell: grep -E -c '/prometheus/api|/api/prom' /opt/loki/config/nginx-loki-gateway.conf | cat
+        register: loki_gatway_config_prom_api
+      - name: 更新文件 /opt/loki/config/nginx-loki-gateway.conf
+        blockinfile:
+          path: /opt/loki/config/nginx-loki-gateway.conf
+          block: |
+            error_log  /dev/stderr;
+            pid        /tmp/nginx.pid;
+            worker_rlimit_nofile 8192;
+
+            events {
+                worker_connections  4096;  ## Default: 1024
+            }
+
+            http {
+              resolver 127.0.0.11;
+
+              default_type application/octet-stream;
+              log_format                 main ' $http_appversion | $remote_addr | $remote_user | $time_local | $request | '
+                                                                  '$status | $body_bytes_sent | $http_referer | '
+                                                                  '$http_user_agent | $http_x_forwarded_for | $request_time | $upstream_response_time | $upstream_addr | $upstream_status | $http_host ';
+              access_log   /dev/stderr  main;
+              sendfile     on;
+              tcp_nopush   on;
+
+              upstream write {
+                server logging-loki-write:3100;
+              }
+
+              upstream read {
+                server logging-loki-read:3100;
+              }
+
+              upstream  cluster {
+                server   logging-loki-read:3100;
+                server   logging-loki-write:3100;
+              }
+
+
+              server {
+                listen 3100;
+                location = / {
+                    return 200 'OK';
+                    default_type 'text/html';
+                    charset utf-8;
+                    auth_basic off;
+                }
+                location = /loki/api/v1/push {
+                    proxy_pass       http://write$request_uri;
+                }
+                
+                location = /ring {
+                    proxy_pass       http://read$request_uri;
+                }
+
+                location = /ready {
+                    proxy_pass       http://cluster$request_uri;
+                }
+
+                location = /memberlist  {
+                    proxy_pass http://read$request_uri;
+                }
+
+                location = /loki/api/v1/tail {
+                    proxy_pass       http://read$request_uri;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                }
+
+                location ~ /loki/api/.* {
+                    proxy_pass       http://read$request_uri;
+                }
+
+                location ~ /prometheus/api/.* {
+                    proxy_pass       http://read$request_uri;
+                }
+
+                location ~ /api/prom/.* {
+                    proxy_pass       http://read$request_uri;
+                }
+              }
+            }
+          backup: yes
+        when: loki_gatway_config_prom_api['stdout']|int != 2
+      - name: 重新启动gateway容器
+        shell: docker restart logging-loki-gateway
+      when: 
+        - loki_docker_register['stdout']|int == 1
+        - loki_gatway_config.stat.isreg is defined

@@ -1,0 +1,14 @@
+# 判断文件是否存在，输出主机清单
+- name: check file exists
+  remote_user: swift
+  hosts: check_file_hosts
+  gather_facts: False
+
+  tasks:
+    - name: Check whether the file exists
+      shell: /bin/ls /etc/frp/frpc.ini
+      register: check_file_info
+      ignore_errors: true
+    - name: output list
+      local_action: shell echo {{ inventory_hostname }} >> /tmp/check_file_info.list
+      when: check_file_info is success

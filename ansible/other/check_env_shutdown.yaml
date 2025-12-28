@@ -1,0 +1,20 @@
+- name: check test env shutdown
+  remote_user: swift
+  hosts: remote_host
+  gather_facts: False
+  tasks:
+  - name: 传脚本
+    synchronize:
+      src: check_env_shutdown.sh
+      dest: /tmp/check_env_shutdown.sh
+      checksum: yes
+  - name: chmod script
+    file:
+      path: /tmp/check_env_shutdown.sh
+      mode: u+x
+  - name: Execute shell script
+    shell: /tmp/check_env_shutdown.sh
+  # - name: delete script
+  #   file:
+  #     path: /tmp/check_env_shutdown.sh
+  #     state: absent

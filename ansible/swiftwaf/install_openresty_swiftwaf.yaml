@@ -1,0 +1,242 @@
+- name: install nginx
+  remote_user: swift
+  hosts: openresty_host
+  # gather_facts: True
+  gather_facts: False
+  tasks:
+    # 获取系统版本
+    - name: get system codename
+      shell: lsb_release -c | awk '{print $NF}'
+      register: system_codename
+    # ansible_facts.distribution_release
+    # 获取nginx版本
+    - name: check nginx version
+      shell: nginx -v 2>&1|grep openresty/1.19.9.1 -c | cat
+      register: nginx_check_status
+
+    # 系统版本符合，nginx版本符合，才进行安装
+    - block:
+        # - name: scp source file
+        #   command: scp /home/swift/packages/openresty.tar {{ inventory_hostname }}:/tmp
+        #   tags: downloads
+        #   delegate_to: localhost
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        - name: download openrestry.tar.gz
+          shell: cd /tmp/ && wget http://static.company.xxxxxxxxxxx.com:9090/packages/openresty.tar -T 10
+        - name: install nginx base packages-1
+          raw: cd /tmp/ && tar -xvf openresty.tar
+          ignore_errors: True
+          register: myoutput
+          changed_when: myoutput.rc
+        # - name: install nginx base packages-2
+        #   raw: cd openresty/archives && sudo dpkg -i *.deb
+        #   ignore_errors: True
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        - name: install WAF-1
+          raw: cd /tmp/openresty/ && sudo cp -pr lib/libjemalloc* /usr/local/lib/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-2
+          raw: cd /tmp/openresty/ && sudo cp -pr lib/libmaxminddb* /usr/lib/x86_64-linux-gnu/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-3
+          raw: cd /tmp/openresty/ && sudo cp -pr lualib /etc/nginx/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-4
+          raw: cd /tmp/openresty/ && sudo cp -pr luajit /etc/nginx/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-5
+          raw: cd /tmp/openresty/ && sudo cp -pr GeoLite2 /etc/nginx/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-6
+          raw: sudo /sbin/ldconfig
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-7
+          raw: cd /tmp/openresty/ && sudo ldd sbin/nginx
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-8
+          raw: sudo mv /usr/sbin/nginx /usr/sbin/nginx.bak
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-9
+          raw: cd /tmp/openresty/ && sudo cp sbin/nginx /usr/sbin/
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-10
+          raw: sudo mkdir -p /var/cache/nginx/proxy_cache_temp /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-11
+          raw: sudo chown -R www-data.www-data /var/cache/nginx
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-12
+          raw: sudo mv /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: install WAF-13
+          raw: cd /tmp/openresty/ && sudo cp nginx.conf /etc/nginx/
+          register: myoutput
+          changed_when: myoutput.rc
+      # - name: restart nginx
+      #   raw: sudo systemctl restart nginx.service
+      #   register: myoutput
+      #   changed_when: myoutput.rc
+      # - name: setup tcp_tw_recycle
+      #   shell: set -o pipefail && echo "net.ipv4.tcp_tw_recycle = 0" |sudo tee -a /etc/sysctl.conf
+      #   register: myoutput
+      #   changed_when: myoutput.rc
+      #   args:
+      #     executable: /usr/bin/bash
+      # - name: Effective configuration
+      #   raw: sudo sysctl -p
+      #   register: myoutput
+      #   changed_when: myoutput.rc
+      when:
+        - system_codename['stdout'] == 'xenial'
+        - nginx_check_status['stdout']|int == 0
+
+    # 检查nginx中json日志格式
+    - name: check nginx config jsonlog
+      shell: sed -n  '/\s\+log_format\s\+jsonlog/,/;/p' /etc/nginx/nginx.conf|grep -E '\$uri|\$body_bytes_sent' -c | cat warn=false
+      register: nginx_config_jsonlog_status
+    # 修改nginx配置，先删除后添加
+    - block:
+        - name: delete jsonlog
+          shell: sudo sed -i '/\s\+log_format\s\+jsonlog/,/;/d' /etc/nginx/nginx.conf warn=false
+        - name: add jsonlog
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: /etc/nginx/nginx.conf
+            marker: "        # {mark} ANSIBLE MANAGED BLOCK jsonlog"
+            insertbefore: "access_log.*/var/log/nginx/access.log.*;"
+            content: |2
+                  log_format  jsonlog '{'
+                      '"http_host": "$http_host",'
+                      '"server_addr": "$server_addr",'
+                      '"remote_addr":"$remote_addr",'
+                      '"time_local":"$time_local",'
+                      '"request_method":"$request_method",'
+                      '"request":"$request",'
+                      '"uri":"$uri",'
+                      '"request_uri":"$request_uri",'
+                      '"status":$status,'
+                      '"body_bytes_sent":"$body_bytes_sent",'
+                      '"bytes_sent":$bytes_sent,'
+                      '"http_referer":"$http_referer",'
+                      '"http_user_agent":"$http_user_agent",'
+                      '"upstream_addr":"$upstream_addr",'
+                      '"upstream_status":"$upstream_status",'
+                      '"upstream_cache_status":"$upstream_cache_status",'
+                      '"http_x_forwarded_for ":"$http_x_forwarded_for",'
+                      '"swift_x_api_ver ":"$http_x_api_ver",'
+                      '"swift_x_hos_id ":"$http_x_hos_id",'
+                      '"upstream_response_time":"$upstream_response_time",'
+                      '"request_time":"$request_time",'
+                      '"x_api_token":"$arg_x_api_token",'
+                      '"geoip_country_code":"$geoip2_country_code",'
+                      '"geoip_city_name_en":"$geoip2_city_name_en"'
+                  '}';
+      when: nginx_config_jsonlog_status['stdout']|int != 2
+
+    # - name: install nginx
+    #   remote_user: swift
+    #   hosts: waf_host
+    #   gather_facts: False
+    #   tasks:
+    - name: check swiftwaf
+      stat:
+        path: /etc/nginx/swiftwaf
+      register: swiftwaf_path
+    - block:
+        # - name: git clone source file
+        #   local_action: raw cd /opt/swiftwaf && git pull
+        #   tags: downloads
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        # - name: delete
+        #   local_action: raw rm -rf /tmp/swiftwaf
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        # - name: git clone source file
+        #   local_action: raw cp -pr /opt/swiftwaf /tmp/
+        #   tags: downloads
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        # - name: delete other file
+        #   local_action: raw cd /tmp/swiftwaf && rm -rf conf_json/ip/deny.ip
+        #   tags: downloads
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        # - name: sed config
+        #   command:  sed -i 's|lua_code_cache off;|lua_code_cache on;|g' conf/waf.conf
+        #   tags: downloads
+        #   delegate_to: localhost
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        #   args:
+        #     chdir: /tmp/swiftwaf
+        # - name: sed config
+        #   raw:  rm -rf /tmp/swiftwaf/.git
+        #   tags: downloads
+        #   delegate_to: localhost
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        # - name: tar swiftwaf
+        #   command: tar -cvf swiftwaf.tar swiftwaf/
+        #   tags: downloads
+        #   delegate_to: localhost
+        #   register: myoutput
+        #   changed_when: myoutput.rc
+        #   args:
+        #     chdir: /tmp/
+        - name: scp source file
+          command: scp /tmp/swiftwaf.tar {{ inventory_hostname }}:/tmp
+          tags: downloads
+          delegate_to: localhost
+          register: myoutput
+          changed_when: myoutput.rc
+        - name: delete
+          command: rm -rf swiftwaf
+          ignore_errors: True
+          register: myoutput
+          changed_when: myoutput.rc
+          args:
+            chdir: /tmp/
+        - name: install nginx base packages-2
+          command: tar -xvf swiftwaf.tar
+          ignore_errors: True
+          register: myoutput
+          changed_when: myoutput.rc
+          args:
+            chdir: /tmp/
+        - name: install WAF-1
+          raw: sudo rm -rf /tmp/swiftwaf.bak && sudo mv /etc/nginx/swiftwaf /tmp/swiftwaf.bak
+          register: myoutput
+          changed_when: myoutput.rc
+          ignore_errors: True
+        - name: install WAF-2
+          raw: sudo cp -pr /tmp/swiftwaf /etc/nginx/
+          register: myoutput
+          changed_when: myoutput.rc
+          ignore_errors: True
+        - name: install WAF-3
+          raw: sudo touch /etc/nginx/swiftwaf/conf_json/ip/deny.ip
+          register: myoutput
+          changed_when: myoutput.rc
+          ignore_errors: True
+        - name: install WAF-4
+          raw: sudo cp -pr /tmp/swiftwaf.bak/conf_json/ip/deny.ip /etc/nginx/swiftwaf/conf_json/ip/
+          register: myoutput
+          changed_when: myoutput.rc
+          ignore_errors: True
+      when: swiftwaf_path.stat.isdir is not defined

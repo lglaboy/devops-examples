@@ -1,0 +1,70 @@
+# 安装postgres_cold_standby,pg冷备库,12.14版本,带vim
+- name: install postgres_cold_standby
+  hosts: postgres_cold_standby_hosts
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/postgres:14.4-vim
+    download_image_name: postgres_cold_standby-14_vim.tgz
+  tasks:
+    - name: Check to see if postgres_cold_standby is installed
+      shell: docker ps -a|grep -c postgres_cold_standby|cat
+      register: postgres_cold_standby_register
+    # - name: 检查是否存在walreceiver进程,为备库
+    #   shell: ps -ef|grep -v grep |grep walreceiver
+    #   register: pg_slave_register
+    #   ignore_errors: True
+
+    # 传包
+    - block:
+        - name: download image for swr
+          shell: docker pull {{docker_image}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: save image to /tmp
+          shell: docker save {{docker_image}} > /tmp/{{download_image_name}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: scp image to remote
+          shell: scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{inventory_hostname}}:/tmp
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+
+        - name: 删除镜像文件
+          file:
+            path: /tmp/{{download_image_name}}
+            state: absent
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+      rescue:
+        - name: copy postgres_cold_standby package to remote_host
+          local_action: shell scp -o PasswordAuthentication=no /home/swift/packages/{{download_image_name}} {{ inventory_hostname }}:/tmp
+        - name: import docker image
+          shell: docker load < /tmp/{{download_image_name}}
+      when: postgres_cold_standby_register['stdout']|int == 0
+
+    - block:
+        - name: 配置postgres用户拥有docker权限
+          shell: sudo usermod -aG docker postgres
+
+        - name: 初始化目录/data/postgres_cold_standby
+          become: yes
+          become_user: postgres
+          shell: bash -c "mkdir /data/postgres_cold_standby/{data,var_lib_postgresql_temp,var_lib_postgresql_data} -p"
+          register: mkdir_postgres_register
+          ignore_errors: True
+
+        - name: 初始化目录/data/postgres_cold_standby
+          shell: sudo bash -c "mkdir /data/postgres_cold_standby/{data,var_lib_postgresql_temp,var_lib_postgresql_data} -p" && sudo bash -c "chown postgres.postgres /data/postgres_cold_standby -R"
+          when: mkdir_postgres_register.failed == true
+
+        - name: docker run postgres_cold_standby
+          shell: docker run -itd --name postgres_cold_standby -p 15432:5432 --cpus 2 -m 4G --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 -l basic.hostname=$(hostname) -l basic.ip=$(hostname -I | awk '{print $1}') -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /data/postgres_cold_standby/data:/data -v /data/postgres_cold_standby/var_lib_postgresql_data:/var/lib/postgresql/data -v /data/postgres_cold_standby/var_lib_postgresql_temp:/var/lib/postgresql/temp -e POSTGRES_PASSWORD=postgres {{docker_image}}
+
+        - name: 删除镜像文件
+          file:
+            path: /tmp/{{download_image_name}}
+            state: absent
+      when:
+        - postgres_cold_standby_register['stdout']|int == 0
+        # - pg_slave_register.rc|int == 0

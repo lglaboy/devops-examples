@@ -1,0 +1,49 @@
+# Date: 2024-12-09 10:34
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 采集主机信息
+# Version: v1.0
+
+# 根据指定的环境名查找相关主机
+# 用法 -e env_name="xxxx-prod"
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # 检查变量是否定义
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbook check_ip_packages.yml -e env_name='xxxxxxxx-prod'"
+      when: env_name is not defined
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: env_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+- name: 获取 {{ env_name }} 主机信息
+  hosts: env_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    hosts_config: "/etc/hosts"
+  tasks:
+    # 内网IP
+    #
+    # cpu
+    # lscpu |grep '^CPU(s)'|awk '{print $2}'
+    # 内存
+    # grep MemTotal /proc/meminfo | sed 's/ //g'|cut -d: -f2
+    # 磁盘
+    # sudo fdisk -l | grep "Disk /" |cut -d, -f1
+    # sudo fdisk -l | grep "Disk /" |cut -d, -f1 |tr '\n' ',' |sed 's/,/|/'
+    - name: 采集信息
+      shell: lscpu |grep '^CPU(s)'|awk '{print $2}'
+      register: config_info

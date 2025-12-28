@@ -1,0 +1,42 @@
+# 安装postgres_cold_standby,pg冷备库
+# 更新因为异常删除冷备库启动失败的容器
+- name: install postgres_cold_standby
+  hosts: postgres_cold_standby_hosts
+  gather_facts: False
+  tasks:
+    - name: Check to see if postgres_cold_standby is installed
+      shell: docker ps -a|grep -c postgres_cold_standby|cat
+      register: postgres_cold_standby_register
+    - name: 检查是否存在walreceiver进程，为备库
+      shell: ps -ef|grep -v grep |grep -c walreceiver
+      register: pg_slave_register
+      ignore_errors: True
+    - block:
+            #      - name: copy postgres_cold_standby package to remote_host
+            #        local_action: shell scp /home/swift/packages/postgres_cold_standby.tgz {{ inventory_hostname }}:/tmp
+            #      - name: import docker image
+            #        shell: docker load < /tmp/postgres_cold_standby.tgz
+      - name: 删除容器
+        shell: docker rm -f postgres_cold_standby
+        ignore_errors: True
+      - name: 删除目录
+        shell: sudo bash -c "mv /data/postgres_cold_standby/{ssd,swdb,temp} /tmp/ && sudo rm -rf /tmp/{ssd,swdb,temp}"
+        ignore_errors: True
+      - name: docker run postgres_cold_standby
+        shell: docker run -itd --name postgres_cold_standby -p 15432:5432 --cpus 2 -m 4G --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 -l basic.hostname=$(hostname) -l basic.ip=$(hostname -I | awk '{print $1}') -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /data/postgres_cold_standby/data:/data -v /data/postgres_cold_standby/var_lib_postgresql_data:/var/lib/postgresql/data -v /data/postgres_cold_standby/var_lib_postgresql_temp:/var/lib/postgresql/temp -e POSTGRES_PASSWORD=postgres swr.cn-east-2.myhuaweicloud.com/common-server/postgres:1-vim
+        #        shell: docker run -itd --name postgres_cold_standby -p 15432:5432 --cpus 2 -m 4G --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 -l basic.hostname=$(hostname) -l basic.ip=$(hostname -I | awk '{print $1}') -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /data/postgres_cold_standby/data:/var/lib/postgresql/data -v /data/postgres_cold_standby/temp:/var/lib/postgresql/temp -v /data/postgres_cold_standby/swdb:/swdb -v /data/postgres_cold_standby/ssd:/ssd -e POSTGRES_PASSWORD=postgres swr.cn-east-2.myhuaweicloud.com/common-server/postgres:1
+        #      - name: 删除镜像文件
+        #        shell: rm -rf /tmp/postgres_cold_standby.tgz
+      when: 
+        - postgres_cold_standby_register['stdout']|int == 1
+        - pg_slave_register['stdout']|int == 1
+    - block:
+      - name: 删除目录
+        shell: sudo bash -c "mv /data/postgres_cold_standby/{ssd,swdb,temp} /tmp/ && sudo rm -rf /tmp/{ssd,swdb,temp}"
+        ignore_errors: True
+      - name: docker run postgres_cold_standby
+        shell: docker run -itd --name postgres_cold_standby -p 15432:5432 --cpus 2 -m 4G --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 -l basic.hostname=$(hostname) -l basic.ip=$(hostname -I | awk '{print $1}') -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /data/postgres_cold_standby/data:/data -v /data/postgres_cold_standby/var_lib_postgresql_data:/var/lib/postgresql/data -v /data/postgres_cold_standby/var_lib_postgresql_temp:/var/lib/postgresql/temp -e POSTGRES_PASSWORD=postgres swr.cn-east-2.myhuaweicloud.com/common-server/postgres:1-vim
+      when:
+        - postgres_cold_standby_register['stdout']|int == 0
+        - pg_slave_register['stdout']|int == 1
+

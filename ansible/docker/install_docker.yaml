@@ -1,0 +1,57 @@
+# Date: 2024-07-10 14:50
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 离线安装docker
+# Version: v1.0
+
+- name: offline install docker
+  hosts: docker_hosts
+  remote_user: swift
+  # 不需要获取主机信息，False 提高速度
+  gather_facts: False
+  tasks:
+    # 获取目标机器codename
+    - name: 获取 codename
+      shell: . /etc/os-release && echo "$VERSION_CODENAME"
+      register: system_codename
+    # 检查目标机器docker是否安装
+    - name: 检查docker是否安装
+      shell: docker version
+      register: docker_version
+      ignore_errors: true
+    # 检查对应离线安装包是否存在
+
+    - block:
+      - name: 检查离线安装包文件是否存在
+        connection: local
+        stat:
+          path: /home/swift/packages/{{ system_codename.stdout }}_docker.tar
+        register: docker_package
+        # 不存在退出
+      - fail:
+          msg: "离线安装包：{{ /home/swift/packages/{{ system_codename.stdout }}_docker.tar }} 不存在"
+        when: docker_package.stat.isreg is undefined
+
+        # 存在继续
+      # - debug:
+      #     msg: "文件存在"
+      #   when: docker_package.stat.isreg is defined and docker_package.stat.isreg
+
+      - name: scp source file
+        connection: local
+        shell: scp /home/swift/packages/{{ system_codename.stdout }}_docker.tar {{ inventory_hostname }}:/tmp
+
+      - name: install packages
+        raw: cd /tmp/ && sudo rm -rf {{ system_codename.stdout }}_docker && tar -xvf {{ system_codename.stdout }}_docker.tar && cd {{ system_codename.stdout }}_docker && sudo dpkg -i *.deb
+
+
+      # 文件名称不规范的话，只能根据系统版本传包操作
+      # 每个系统一个单独的block，执行各自的操作
+
+
+      # 存在离线包，未安装，进行安装
+        # 传包
+        # 解压
+        # 安装
+      when:
+        - docker_version.rc != 0

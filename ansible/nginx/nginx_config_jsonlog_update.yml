@@ -1,0 +1,99 @@
+# Date: 2023-01-31 18:16
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: nginx添加输出json格式日志，并修改现有access中配置的日志，promtail更新，收集nginx日志
+# Version: v1.0
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_config_jsonlog_update.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: nginx_config_jsonlog_update_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: update nginx
+  hosts: nginx_config_jsonlog_update_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_config_jsonlog_update.csv
+  tasks:
+    # 判断是否有nginx，有nginx，修改nginx配置生效，无nginx，直接跳过
+    # 1.存在nginx进程运行
+    # 2.存在nginx.conf文件
+    - name: 检查nginx进程是否存在
+      shell: pgrep -c nginx | cat
+      register: nginx_process_status
+    - name: 检查nginx.conf配置文件是否存在
+      stat:
+        path: /etc/nginx/nginx.conf
+      register: nginx_conf_status
+      when: nginx_process_status['stdout']|int > 0
+    - name: 检查nginx配置是否存在问题
+      become: yes
+      become_method: sudo
+      shell: nginx -t
+      register: nginx_conf_check_status
+      ignore_errors: true
+      when: nginx_process_status['stdout']|int > 0
+    # nginx进程存在，主配置文件存在，nginx配置检查通过，进行修改
+    - block:
+      - name: 检查是否存在json格式日志输出
+        shell: grep -c jsonlog /etc/nginx/nginx.conf | cat
+        register: nginx_conf_jsonlog_status
+      - block:
+        - name: 检查jsonlog中是否包含指定内容
+          shell: sed -n '/\s\+log_format\s\+jsonlog/,/;/p' /etc/nginx/nginx.conf |grep -c swift_x_actual_user_id|cat
+          register: nginx_config_jsonlog_acturl_status
+        - block:
+          - name: 添加http_x_actual_user_id字段
+            become: yes
+            become_method: sudo
+            shell: sed -i.$(date "+%F@%T")~ -e $'/jsonlog/!b;:a;/swift_x_hos_id/bb;$!{N;ba};:b;/swift_x_hos_id/a\\            \'\"swift_x_actual_user_id\":\"\$http_x_actual_user_id\",\'' /etc/nginx/nginx.conf
+            args:
+              executable: /bin/bash
+          - name: 检查配置文件是否异常
+            become: yes
+            become_method: sudo
+            shell: nginx -t
+            register: nginx_conf_update_check_status
+            ignore_errors: true
+          - name: 配置文件没问题, 热加载nginx配置
+            become: yes
+            become_method: sudo
+            shell: nginx -s reload
+            when: nginx_conf_update_check_status.rc|int == 0
+          - name: 输出已更新主机记录
+            local_action: shell echo "{{ inventory_hostname }},nginx有jsonlog配置,无http_x_actual_user_id,已更新" >> "{{ log_file }}"
+            when: nginx_conf_update_check_status.rc|int == 0
+          - name: 输出未成功更新主机记录
+            local_action: shell echo "{{ inventory_hostname }},nginx有jsonlog配置,无http_x_actual_user_id,nginx检查失败未更新" >> "{{ log_file }}"
+            when: nginx_conf_update_check_status.rc|int != 0
+          when: nginx_config_jsonlog_acturl_status['stdout']|int == 0
+        - name: 输出未更新主机记录
+          local_action: shell echo "{{ inventory_hostname }},nginx有jsonlog配置,有http_x_actual_user_id,未更新" >> "{{ log_file }}"
+          when: nginx_config_jsonlog_acturl_status['stdout']|int == 1
+        when: 
+          - nginx_conf_jsonlog_status['stdout']|int >= 1
+      - name: 输出无jsonlog主机记录
+        local_action: shell echo "{{ inventory_hostname }},nginx无jsonlog配置,未判断http_x_actual_user_id,未更新" >> "{{ log_file }}"
+        when: nginx_conf_jsonlog_status['stdout']|int == 0
+      when:
+        - nginx_process_status['stdout']|int > 0
+        - nginx_conf_status.stat.isreg is defined
+        - nginx_conf_check_status.rc|int == 0

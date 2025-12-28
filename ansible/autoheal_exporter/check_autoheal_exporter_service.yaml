@@ -1,0 +1,62 @@
+# Date: 2024-11-07 20:02
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查autoheal_exporter服务健康状态，重启不健康容器
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_autoheal_info.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: autoheal_exporter_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 检查autoheal_exporter
+- name: check autoheal_exporter
+  hosts: autoheal_exporter_hosts
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_autoheal_info.csv
+  tasks:
+    - name: Check to see if autoheal_exporter is installed
+      shell: timeout 10 docker ps -a --format {{ '{{' }}.Names{{ '}}' }} | grep -c "^autoheal_exporter$" | cat
+      register: autoheal_register
+
+    - block:
+      - name: get autoheal_exporter status
+        shell: docker inspect autoheal_exporter -f {{ '{{' }}.State.Health.Status{{ '}}' }}
+        register: autoheal_service_status
+      - block:
+        - name: check autoheal_exporter status
+          shell: docker restart autoheal_exporter
+        - name: 输出异常结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},autoheal_exporter 异常已重启" >> "{{ log_file }}"
+        when:
+          - autoheal_service_status['stdout'] == "unhealthy"
+      - name: 输出正常结果
+        connection: local
+        shell: echo "{{ inventory_hostname }},autoheal_exporter 正常不重启" >> "{{ log_file }}"
+        when:
+          - autoheal_service_status['stdout'] != "unhealthy"
+      when:
+        - autoheal_register['stdout']|int == 1
+
+    - name: 输出不存在结果
+      connection: local
+      shell: echo "{{ inventory_hostname }},autoheal_exporter 不存在" >> "{{ log_file }}"
+      when:
+        - autoheal_register['stdout']|int == 0

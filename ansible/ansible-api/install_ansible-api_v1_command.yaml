@@ -1,0 +1,52 @@
+# 安装ansible-api的脚本
+- name: install ansible-api docker
+  hosts: ansible_api_hosts
+  gather_facts: False
+  remote_user: swift
+  tasks:
+    - name: get host ip
+      setup:
+        gather_subset:
+          - "network"
+      register: result
+    - name: scp ansible-api package to remote
+      local_action: command scp /home/swift/packages/ansible-api_v1.tar {{ inventory_hostname }}:/tmp
+    - name: copy config to remote
+      copy:
+        src: /home/swift/devops/Autoinstall/ansible_api_conf/
+        dest: /tmp/ansible_api_conf
+    - name: create home directory
+      file:
+        path: /opt/ansible-api
+        state: directory
+        owner: swift
+        group: swift
+    - name: copy profile to directory
+      shell: cp -pr /tmp/ansible_api_conf/* /opt/ansible_api/
+    # 判断是否已经添加过hosts解析
+    - name: read the /etc/hosts
+      shell: cat /etc/hosts
+      register: hosts_register
+    - name: a task that only happens if the registry non-existent
+      when: hosts_register.stdout.find('local-registry') == -1
+      shell: echo "\n# ANSIBLE_API_HOST\n{{ result['ansible_facts']['ansible_default_ipv4']['address'] }}    ansible_api_host" |sudo tee -a /etc/hosts
+    # 判断是否已经生成密钥对
+    - name: check_ssh_public_key
+      shell: find /home/swift/ -name id_rsa.pub|wc -l
+      register: ssh_public_key_exit
+    - name: check_ssh_private_key
+      shell: find /home/swift/ -name id_rsa|wc -l
+      register: ssh_private_key_exit
+    - name: create_ssh_key
+      shell: ssh-keygen -t rsa -P "" -f ~/.ssh/id_rsa
+      when: ( ssh_public_key_exit['stdout_lines'][0] == '0' and ssh_private_key_exit['stdout_lines'][0] == '0' )
+    - name: add public key to authorized_keys
+      shell: cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+    - name: copy private key to ansible-api home
+      shell: cp ~/.ssh/id_rsa /opt/ansible-api/
+    - name: import docker image
+      shell: docker load < /tmp/ansible-api_v1.tar
+    - name: start elasticsearch service
+      shell: docker run -itd -p 8765:8765 --name ansible-api --restart=unless-stopped -v /etc/hosts:/etc/hosts -v /opt/ansible-api:/opt/ansible-api -v /opt/ansible-api/ansible.cfg:/etc/ansible/ansible.cfg -v /var/run/docker.sock:/var/run/docker.sock  swr.cn-east-2.myhuaweicloud.com/common-server/ansible-api:v1 ansible-api -c /opt/ansible-api/api.cfg
+    - name: add docker ssh config
+      shell: sleep 10s && docker exec ansible-api bash -c "echo 'StrictHostKeyChecking no' >>~/.ssh/config"

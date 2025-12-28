@@ -1,0 +1,231 @@
+# 测试端口连通的ansible-playbook
+# 两个主机组，内网，外网
+
+
+# 根据主机名称，从/etc/ssh/ssh_config获取主机IP
+
+
+- name: build_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+  tasks:
+    # - name: debug groups
+    #   debug:
+    #     var=groups['dmz_port_hosts']
+    - name: clean env
+      shell: rm -rf "{{ home_dir }}"  && mkdir "{{ home_dir }}"
+    - name: get dmz_port_hosts IP > /tmp/dmz_port_hosts_ip
+      shell: echo "{{ item }} $(grep "Host.*{{ item }}" /etc/ssh/ssh_config -A 1|grep HostName|awk '{print $2}')" >> "{{ home_dir }}"/dmz_port_hosts_ip
+# 测试完，删除该ip文件，避免影响下次执行
+      with_items:
+        - "{{ groups['dmz_port_hosts'] }}"
+    - name: get undmz_port_hosts IP > /tmp/undmz_port_hosts_ip
+      shell: echo "{{ item }} $(grep "Host.*{{ item }}" /etc/ssh/ssh_config -A 1|grep HostName|awk '{print $2}')" >> "{{ home_dir }}"/undmz_port_hosts_ip
+# 测试完，删除该ip文件，避免影响下次执行
+      with_items:
+        - "{{ groups['undmz_port_hosts'] }}"
+    #   register: test
+    # - name:
+    #   debug:
+    #     var: test
+
+# 外网启动端口
+- name: dmz startup port
+  hosts: dmz_port_hosts
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+    dmz_startup_port_output_file: /tmp/dmz_startup_port.log
+    dmz_port: ["80","5000","6443"]
+    # undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: delete "{{ dmz_startup_port_output_file }}"
+      shell: rm -rf "{{ dmz_startup_port_output_file }}"
+    - name: startup port
+      shell: (nc -z $(hostname -I|awk '{print $1}') {{ item }} && echo "{{ item }} port Address already in use" >> "{{ dmz_startup_port_output_file }}") || ((nohup sudo python2.7 -m SimpleHTTPServer {{ item }} &> /dev/null &) && echo "{{ item }} port started successfully" >> "{{ dmz_startup_port_output_file }}")
+      with_items:
+        - "{{ dmz_port }}"
+    - name: Output port startup
+      shell: cat "{{ dmz_startup_port_output_file }}"|sort -k2r -k1,1g
+      register: dmz_startup_port
+    # - name: debug
+    #   debug:
+    #     var: dmz_startup_port['stdout_lines']
+    - name: 保存到本地
+      local_action: shell echo "{{ inventory_hostname }}" >> "{{ home_dir }}"/dmz_startup_port_output_file.log && echo "{{ dmz_startup_port['stdout'] }}" >> "{{ home_dir }}"/dmz_startup_port_output_file.log
+
+# 根据nc测试本机端口连通性，成功报已存在，不成功，则启动
+
+
+# 内网启动端口
+- name: undmz startup port
+  hosts: undmz_port_hosts
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+    # 内网端口启动日志输出文件
+    undmz_startup_port_output_file: /tmp/undmz_startup_port.log
+    # dmz_port: ["80","5000","6443"]
+    undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: delete "{{ undmz_startup_port_output_file }}"
+      shell: rm -rf "{{ undmz_startup_port_output_file }}"
+    - name: startup port
+      shell: (nc -z $(hostname -I|awk '{print $1}') {{ item }} && echo "{{ item }} port Address already in use" >> "{{ undmz_startup_port_output_file }}") || ((nohup sudo python2.7 -m SimpleHTTPServer {{ item }} &> /dev/null &) && echo "{{ item }} port started successfully" >> "{{ undmz_startup_port_output_file }}")
+      with_items:
+        - "{{ undmz_port }}"
+    - name: Output port startup
+      shell: cat "{{ undmz_startup_port_output_file }}"|sort -k2r -k1,1g
+      register: undmz_startup_port
+    # - name: debug
+    #   debug:
+    #     var: undmz_startup_port['stdout_lines']
+    - name: 保存到本地
+      local_action: shell echo "{{ inventory_hostname }}" >> "{{ home_dir }}"/undmz_startup_port_output_file.log && echo "{{ undmz_startup_port['stdout'] }}" >> "{{ home_dir }}"/undmz_startup_port_output_file.log
+
+# 外网测试内网端口连通性
+- name: dmz test undmz port
+  hosts: dmz_port_hosts
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+    dmz_to_undmz_port_output_file: /tmp/dmz_to_undmz_port.log
+    # dmz_port: ["80","5000","6443"]
+    undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: get undmz host ip
+      local_action: shell cat "{{ home_dir }}"/undmz_port_hosts_ip |awk '{print $2}'
+      register: undmz_host_ip
+    # - name: debug
+    #   debug:
+    #     var: undmz_host_ip['stdout_lines']
+    # - name: set test var
+    #   set_fact:
+    #     test_var: "{{ undmz_host_ip['stdout_lines'] }}"
+    - name: clean env
+      shell: rm -f {{ dmz_to_undmz_port_output_file }}
+    - name: test port connectivity
+      # local_action: shell echo "{{ item[0] }}" "{{ item[1] }}" >> "{{ home_dir }}"/dmz_to_undmz_port.log
+      shell: nc -z -w 1 "{{ item[0] }}" "{{ item[1] }}" && echo "{{ inventory_hostname }} 访问 {{ item[0] }} 的端口 {{ item[1] }} succeeded!" >> {{ dmz_to_undmz_port_output_file }} || echo "{{ inventory_hostname }} 访问 {{ item[0] }} 的端口 {{ item[1] }} failed!" >> {{ dmz_to_undmz_port_output_file }}
+      with_nested:
+        - "{{ undmz_host_ip['stdout_lines'] }}"
+        - "{{ undmz_port }}"
+    - name: get dmz access to undmz port info
+      shell: cat {{ dmz_to_undmz_port_output_file }}|sort -k3,3 -k6,6r -k5,5g
+      register: dmz_to_undmz_port
+    # - name: debug
+    #   debug:
+    #     var: dmz_to_undmz_port['stdout_lines']
+    #   register: test
+    # - name:
+    #   debug:
+    #     var: test
+    - name: 保存到本地
+      local_action: shell echo "{{ inventory_hostname }}" >> "{{ home_dir }}"/dmz_to_undmz_port_output_file.log && echo "{{ dmz_to_undmz_port['stdout'] }}" >> "{{ home_dir }}"/dmz_to_undmz_port_output_file.log
+
+# 内网测试外网连通性
+- name: undmz test dmz port
+  hosts: undmz_port_hosts
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+    undmz_to_dmz_port_output_file: /tmp/undmz_to_dmz_port.log
+    dmz_port: ["80","5000","6443"]
+    # undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: get dmz host ip
+      local_action: shell cat "{{ home_dir }}"/dmz_port_hosts_ip |awk '{print $2}'
+      register: dmz_host_ip
+    - name: clean env
+      shell: rm -f {{ undmz_to_dmz_port_output_file }}
+    - name: test port connectivity
+      # local_action: shell echo "{{ item[0] }}" "{{ item[1] }}" >> "{{ home_dir }}"/dmz_to_undmz_port.log
+      shell: nc -z -w 1 "{{ item[0] }}" "{{ item[1] }}" && echo "{{ inventory_hostname }} 访问 {{ item[0] }} 的端口 {{ item[1] }} succeeded!" >> {{ undmz_to_dmz_port_output_file }} || echo "{{ inventory_hostname }} 访问 {{ item[0] }} 的端口 {{ item[1] }} failed!" >> {{ undmz_to_dmz_port_output_file }}
+      with_nested:
+        - "{{ dmz_host_ip['stdout_lines'] }}"
+        - "{{ dmz_port }}"
+    - name: get undmz access to dmz port info
+      shell: cat {{ undmz_to_dmz_port_output_file }}|sort -k3,3 -k6,6r -k5,5g
+      register: undmz_to_dmz_port
+    # - name: debug
+    #   debug:
+    #     var: undmz_to_dmz_port['stdout_lines']
+    #   register: test
+    # - name:
+    #   debug:
+    #     var: test
+    - name: 保存到本地
+      local_action: shell echo "{{ inventory_hostname }}" >> "{{ home_dir }}"/undmz_to_dmz_port_output_file.log && echo "{{ undmz_to_dmz_port['stdout'] }}" >> "{{ home_dir }}"/undmz_to_dmz_port_output_file.log
+
+# 关闭外网启动端口
+- name: close dmz port
+  hosts: dmz_port_hosts
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+    dmz_to_undmz_port_output_file: /tmp/dmz_to_undmz_port.log
+    dmz_port: ["80","5000","6443"]
+    # undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: close dmz port
+      shell: (sudo kill -9 $(ps -ef |grep "python2.7 -m SimpleHTTPServer"|grep -v grep|awk '{print $2}') 1> /dev/null 2>&1 || echo "无通过脚本启动的测试端口") && echo "测试端口已关闭"
+
+
+# 关闭内网启动端口
+- name: close undmz port
+  hosts: undmz_port_hosts
+  gather_facts: False
+  # vars:
+  #   home_dir: /tmp/dmz_and_undmz_port_test
+  #   dmz_to_undmz_port_output_file: /tmp/dmz_to_undmz_port.log
+  #   dmz_port: ["80","5000","6443"]
+  #   # undmz_port: ["22","2020","5432","6379","8080","8848","9090","9200","9300","9876","10250","10256","10909","10911","12580","12581","12582","12583","12584","12585","27017"]
+  tasks:
+    - name: close undmz port
+      shell: (sudo kill -9 $(ps -ef |grep "python2.7 -m SimpleHTTPServer"|grep -v grep|awk '{print $2}') 1> /dev/null 2>&1 || echo "无通过脚本启动的测试端口") && echo "测试端口已关闭"
+
+
+# 输出外网访问内网检测结果
+- name: output 外网访问内网端口检测结果
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    home_dir: /tmp/dmz_and_undmz_port_test
+  tasks:
+    - name: 获取外网访问内网端口检测结果输出
+      shell: cat "{{ home_dir }}"/dmz_to_undmz_port_output_file.log
+      register: dmz_to_undmz_port
+    - name: 获取内网访问外网端口检测结果输出
+      shell: cat "{{ home_dir }}"/undmz_to_dmz_port_output_file.log
+      register: undmz_to_dmz_port
+    - name: 获取外网端口启动情况输出
+      shell: cat "{{ home_dir }}"/dmz_startup_port_output_file.log
+      register: dmz_startup_port
+    - name: 获取内网端口启动情况输出
+      shell: cat "{{ home_dir }}"/undmz_startup_port_output_file.log
+      register: undmz_startup_port
+
+
+    - name: 输出外网访问内网端口检测结果
+      debug:
+        var: dmz_to_undmz_port['stdout_lines']
+    - name: 输出内网访问外网端口检测结果
+      debug:
+        var: undmz_to_dmz_port['stdout_lines']
+    - name: 输出外网端口启动情况
+      debug:
+        var: dmz_startup_port['stdout_lines']
+    - name: 输出内网端口启动情况
+      debug:
+        var: undmz_startup_port['stdout_lines']
+
+
+# 输出内网访问外网检测结果
+
+# 输出端口启动结果
+
+# 清除本地IP历史记录

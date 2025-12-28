@@ -1,0 +1,21 @@
+# 安装autoheal_only_shell
+# 和autoheal_exporter:v2配套使用，启动时需要指定环境变量PROMETHEUS_CLIENT的地址，即autoheal_exporter映射出来的地址
+# 默认连接prometheus_client的地址：http://local-autoheal-exporter:12587，如需手动指定，使用以下方式
+# ansible-playbook -i hosts install_autoheal_only_shell.yml -e "prometheus_client=http://192.168.1.48:12587"
+- name: install autoheal_only_shell
+  hosts: autoheal_only_shell_hosts
+  gather_facts: False
+  vars:
+    default_prometheus_client: http://local-autoheal-exporter:12587
+  tasks:
+    - name: Check to see if autoheal_only_shell is installed
+      shell: docker ps |grep -c autoheal|cat
+      register: autoheal_register
+    - block:
+      - name: copy autoheal_only_shell package to remote_host
+        local_action: shell scp /home/swift/packages/autoheal_only_shell_v2.tgz {{ inventory_hostname }}:/tmp
+      - name: import docker image
+        shell: docker load < /tmp/autoheal_only_shell_v2.tgz
+      - name: docker run autoheal_only_shell
+        shell: docker run -d --name autoheal_only_shell --restart=unless-stopped -e AUTOHEAL_CONTAINER_LABEL=all -e PROMETHEUS_CLIENT={{ prometheus_client|default(default_prometheus_client) }} -v /var/run/docker.sock:/var/run/docker.sock -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -h $(hostname) swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_only_shell:v2
+      when: autoheal_register['stdout']|int == 0

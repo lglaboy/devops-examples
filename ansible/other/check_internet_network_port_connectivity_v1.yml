@@ -1,0 +1,80 @@
+- name: check Internet network port connectivity
+  remote_user: swift
+  hosts: check_internet_network_port_host
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_internet_network.log
+  tasks:
+    - name: execute script
+      args:
+        executable: /bin/bash
+      shell: |
+        (#!/bin/bash
+        # Date: 2022-8-22 16:15
+        # Author: lglaboy
+        # GitHub: https://github.com/lglaboy
+        # Description: check internet network port
+        # Version: v1.0
+        
+        ip_list='
+        101.89.47.18
+        101.91.34.103
+        119.3.58.180
+        121.51.50.140
+        121.51.58.151
+        110.75.231.202
+        110.76.18.202
+        203.209.245.130
+        203.209.247.64
+        122.112.241.156
+        139.9.125.241
+        36.41.168.150
+        122.112.149.253
+        43.254.0.94
+        122.112.208.90
+        122.112.208.64
+        122.112.208.68
+        119.3.109.189
+        xxx.xxx.xxx.xxx
+        '
+        
+        aliyun_ip_list='xxx.xxx.xxx.xxx'
+        
+        cloud_mq_ip_list='122.112.187.174
+        122.112.177.29
+        '
+        
+        port_list='80
+        443
+        '
+        
+        aliyun_port_list='443
+        2020
+        6000'
+        
+        cloud_mq_port_list='9876
+        10911'
+        check_network_port_connectivity(){
+            local ip_list=$1
+            local port_list=$2
+            for line in $ip_list
+            do
+                for port in $port_list
+                do
+                    nc -z -w 3 "$line" "$port" && echo 访问 IP:"$line" 端口:"$port" succeeded! || echo 访问 IP:"$line" 端口:"$port" failed!
+                done
+            done
+        }
+        check_network_port_connectivity "$ip_list" "$port_list"
+        check_network_port_connectivity "$aliyun_ip_list" "$aliyun_port_list"
+        check_network_port_connectivity "$cloud_mq_ip_list" "$cloud_mq_port_list"
+        ) | sort -k 4
+      register: check_internet_port_register
+    - name: output info to local
+      local_action: shell echo "{{ inventory_hostname }}" > "{{ log_file }}_{{ inventory_hostname|lower }}" && echo "{{ check_internet_port_register.stdout }}" >> "{{ log_file }}_{{ inventory_hostname|lower }}"
+    - name: grep failed 
+      local_action: shell grep -E "APP|failed" "{{ log_file }}_{{ inventory_hostname|lower }}"
+      register: error_info
+    - name: 访问失败
+      debug:
+        var: error_info['stdout_lines']

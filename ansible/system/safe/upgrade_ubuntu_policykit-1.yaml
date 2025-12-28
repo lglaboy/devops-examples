@@ -1,0 +1,201 @@
+- name: echo date to file
+  hosts: localhost
+  connection: local
+  gather_facts: False
+
+  tasks:
+    - name: echo date
+      local_action: shell echo $(date +"%Y-%m-%d %H:%M:%S")
+      register: start_time
+    - name: debug
+      debug:
+        var: start_time.stdout
+    - name: echo date
+      local_action: shell echo {{ start_time.stdout }} >> /tmp/upgrade_ubuntu_policykit_xenial.log && echo {{ start_time.stdout }} >> /tmp/upgrade_ubuntu_policykit_non_xenial.log
+
+- name: upgrade ubuntu policykit-1
+  remote_user: swift
+  hosts: upgrade_ubuntu_policykit-1
+  gather_facts: False
+
+  tasks:
+    - name: 判断系统版本
+      shell: lsb_release -c -s
+      register: system_version
+    - name: debug
+      debug:
+        var: system_version.stdout
+
+# ubuntu 14.04
+
+    - block:
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: frist_check_info
+      - name: scp source file
+        copy:
+          src: /home/swift/k8s-test/ubuntu_patch/policykit-1_0.105-4ubuntu3.14.04.6+esm1_amd64.deb
+          dest: /tmp/
+      - name: install package
+        shell: sudo dpkg -i /tmp/policykit-1_0.105-4ubuntu3.14.04.6+esm1_amd64.deb
+      - name: delete package
+        file:
+          path: /tmp/policykit-1_0.105-4ubuntu3.14.04.6+esm1_amd64.deb
+          state: absent
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: last_check_info
+      - name: debug
+        debug:
+          var: last_check_info.stdout
+      - name: install xenial ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} ok" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'esm1' in last_check_info.stdout"
+      - name: install xenial not ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} no" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'esm1' not in last_check_info.stdout"
+      when: "'trusty' in system_version.stdout"
+
+# ubuntu 16.04
+    - block:
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: frist_check_info
+      - name: scp source file
+        copy:
+          src: /home/swift/k8s-test/ubuntu_patch/policykit-1_0.105-14.1ubuntu0.5+esm1_amd64.deb
+          dest: /tmp/
+      - name: install package
+        shell: sudo dpkg -i /tmp/policykit-1_0.105-14.1ubuntu0.5+esm1_amd64.deb
+      - name: delete package
+        file:
+          path: /tmp/policykit-1_0.105-14.1ubuntu0.5+esm1_amd64.deb
+          state: absent
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: last_check_info
+      - name: debug
+        debug:
+          var: last_check_info.stdout
+      - name: install xenial ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} ok" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'esm1' in last_check_info.stdout"
+      - name: install xenial not ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} no" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'esm1' not in last_check_info.stdout"
+      when: "'xenial' in system_version.stdout"
+
+# ubuntu 18.04
+    - block:
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: frist_check_info
+      - name: scp source file
+        copy:
+          src: /home/swift/k8s-test/ubuntu_patch/policykit_18.04.tar.gz
+          dest: /tmp/
+      - name: install package
+        shell: cd /tmp && tar -xzvf policykit_18.04.tar.gz && sudo dpkg -i /tmp/policykit_18.04/*.deb && rm -rf /tmp/policykit_18.04
+      - name: delete package
+        file:
+          path: /tmp/policykit_18.04.tar.gz
+          state: absent
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: last_check_info
+      - name: debug
+        debug:
+          var: last_check_info.stdout
+      - name: install xenial ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} ok" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'20ubuntu0.18.04.6' in last_check_info.stdout"
+      - name: install xenial not ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} no" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'20ubuntu0.18.04.6' not in last_check_info.stdout"
+      when: "'bionic' in system_version.stdout"
+
+# ubuntu 20.04
+
+    - block:
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: frist_check_info
+      - name: scp source file
+        copy:
+          src: /home/swift/k8s-test/ubuntu_patch/policykit_20.04.tar.gz
+          dest: /tmp/
+      - name: install package
+        shell: cd /tmp && tar -xzvf policykit_20.04.tar.gz && sudo dpkg -i /tmp/policykit_20.04/*.deb && rm -rf /tmp/policykit_20.04
+      - name: delete package
+        file:
+          path: /tmp/policykit_20.04.tar.gz
+          state: absent
+      - name: Check whether policykit-1 is successfully updated
+        shell: sudo dpkg -l|grep " policykit-1 "|awk '{print $3}'
+        register: last_check_info
+      - name: debug
+        debug:
+          var: last_check_info.stdout
+      - name: install xenial ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} ok" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'0.105-26ubuntu1.2' in last_check_info.stdout"
+      - name: install xenial not ok info
+        local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} no" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+        when: "'0.105-26ubuntu1.2' not in last_check_info.stdout"
+      when: "'focal' in system_version.stdout"
+
+
+# centos 7
+    - block:
+      - name: Check whether polkit is successfully updated
+        shell: rpm -qa polkit
+        register: frist_check_info
+      - name: get system_release
+        shell: lsb_release -r -s
+        register: system_release
+      - name: get check system release flag
+        shell: lsb_release -r -s|grep "^7.*" -c
+        register: system_release_check
+      - name: debug
+        debug:
+          var: system_release.stdout
+      - block:
+        - name: scp source file
+          copy:
+            src: /home/swift/k8s-test/ubuntu_patch/centos_7/polkit-0.112-26.el7_9.1.x86_64.rpm
+            dest: /tmp/
+        - name: install package
+          shell: sudo rpm -Uvh /tmp/polkit-0.112-26.el7_9.1.x86_64.rpm
+          ignore_errors: yes
+        - name: delete package
+          file:
+            path: /tmp/polkit-0.112-26.el7_9.1.x86_64.rpm
+            state: absent
+        - name: Check whether polkit is successfully updated
+          shell: rpm -qa polkit
+          register: last_check_info
+        - name: debug
+          debug:
+            var: last_check_info.stdout
+        - name: install xenial ok info
+          local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }}_{{ system_release.stdout }} polkit {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} ok" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+          when: "'polkit-0.112-26.el7_9.1' in last_check_info.stdout"
+        - name: install xenial not ok info
+          local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }}_{{ system_release.stdout }} polkit {{ frist_check_info.stdout }} -> {{ last_check_info.stdout }} no" >> /tmp/upgrade_ubuntu_policykit_xenial.log
+          when: "'polkit-0.112-26.el7_9.1' not in last_check_info.stdout"
+        when: system_release_check.stdout|int > 0
+      when: "'Core' in system_version.stdout"
+
+    - name: install non xenial info
+      local_action: shell echo "{{ inventory_hostname }} {{ system_version.stdout }} policykit-1 " >> /tmp/upgrade_ubuntu_policykit_non_xenial.log
+      when:
+        - "'xenial' not in system_version.stdout"
+        - "'Core' not in system_version.stdout"
+        - "'trusty' not in system_version.stdout"
+        - "'bionic' not in system_version.stdout"
+        - "'focal' not in system_version.stdout"
+        
+
+
+# CentOS 7,codename Core
+# lsb_release -r -s|grep "^7.*"

@@ -1,0 +1,278 @@
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tags: add
+  tasks:
+    # 指定nginx主机组
+    - add_host:
+        name: "{{ nginx_host }}"
+        group: nginx_hosts
+      when: nginx_host is defined
+
+    # 指定 safe_agent 主机组
+    - add_host:
+        name: "{{ safe_agent_host }}"
+        group: safe_agent_hosts
+      when: safe_agent_host is defined
+
+    # 指定 safe_agent 主机组
+    - add_host:
+        name: "{{ nginx_host.split('-')[0] | upper }}-APP-001"
+        group: safe_agent_hosts
+      when: safe_agent_host is undefined
+
+- name: nginx add server_name
+  hosts: nginx_hosts
+  remote_user: swift
+  gather_facts: False
+  tags: add
+  vars:
+    internal_port: 8080
+  tasks:
+    # 定义 upstream_name
+    - name: Set upstream_name variable
+      set_fact:
+        upstream_name: "{{ his_name | default('') if his_name is defined else (server_address|hash)[:8] }}-{{ nginx_host.split('-')[0] | lower }}-prod"
+    # 定义 server_name
+    - name: Set server_name variable
+      set_fact:
+        server_name: "{{ his_name | default('') if his_name is defined else (server_address|hash)[:8] }}-{{ nginx_host.split('-')[0] | lower }}-prod.aliyun-frp.xxxxxxxxxxx.com"
+
+    # TODO: 存在新版k3s环境 nginx部署在pod上的情况,后续添加
+
+    - name: check if the nginx service process exists
+      shell: systemctl is-active nginx
+      ignore_errors: true
+      register: nginx_status
+
+    - name: check if the nginx docker process exists
+      shell: docker ps | awk '{print $NF}' | grep "^swiftwaf$" -c | cat
+      register: nginx_docker_status
+      when:
+        - nginx_status.rc|int != 0
+
+    - name: 执行service添加剧本
+      include_tasks: env/service/add_proxy.yaml
+      when:
+        - nginx_status.rc|int == 0
+
+    - name: 执行docker添加剧本
+      include_tasks: env/docker/add_proxy.yaml
+      when:
+        - nginx_status.rc|int != 0
+        - nginx_docker_status.stdout|int == 1
+
+    # 输出提示信息
+    - name: nginx进程不存在,输出提示信息
+      fail:
+        msg: "在 {{ inventory_hostname }} 主机上,nginx 进程不存在."
+      when:
+        - nginx_status.rc|int != 0
+        - nginx_docker_status.stdout|int == 0
+
+- name: frpc|safe_agent add 映射
+  hosts: safe_agent_hosts
+  remote_user: swift
+  gather_facts: False
+  tags: add
+  vars:
+    server_name: "{{hostvars[nginx_host]['server_name']}}"
+    upstream_name: "{{hostvars[nginx_host]['upstream_name']}}"
+    frpc_config: "/etc/frp/frpc.ini"
+    safe_agent_config: "/opt/safe_agent/config.conf"
+    internal_port: 8080
+  tasks:
+    # 检查frpc进程是否存在
+    - name: check if the frpc process exists
+      shell: systemctl is-active frpc.service
+      ignore_errors: true
+      register: frpc_status
+
+    # frpc 进程不存在，检查safe_agent 进程是否存在
+    - name: check if the safe_agent process exists
+      shell: systemctl is-active safe_agent.service
+      ignore_errors: true
+      register: safe_agent_status
+      when: frpc_status.rc != 0
+
+    # 如果frpc和safe_agent都没有，则直接中断，提示手动指定机器节点
+    - name: 进程不存在，自定义中断
+      fail:
+        msg: "{{ inventory_hostname }} 主机中无frpc和safe_agent。请手动指定机器 -e 'safe_agent_host=XXX-XXX-XXX' "
+      when:
+        - frpc_status.rc != 0
+        - safe_agent_status.rc != 0
+
+    - name: 检查新版k3s内部 10.43.10.20:8080 是否能访问
+      shell: nc -z -w 3 10.43.10.20 8080 && echo success || echo error
+      register: check_k3s_port
+
+    - name: 检查内网端口是否能访问
+      shell: nc -z -w 3 {{nginx_host}} {{internal_port}} && echo success || echo error
+      register: check_internal_port
+      when: check_k3s_port.stdout == "error"
+
+    # 自定义失败
+    - name: k3s内部端口及内网nginx端口均无法访问,中断任务
+      fail:
+        msg: "{{ inventory_hostname }} 主机上,即无法访问k3s内部端口: 10.43.10.20:8080,也无法访问内网nginx端口: {{nginx_host}} {{internal_port}}, 若内网端口非 {{internal_port}}, 请使用 -e internal_port='8080' 指定内网端口"
+      when:
+        - check_k3s_port.stdout == "error"
+        - check_internal_port.stdout == "error"
+
+    # 如果部署了frpc，则按照以下执行
+    - block:
+        - name: check {{ server_address }} 是否已添加
+          shell: grep {{ server_address }} {{frpc_config}} -c |cat
+          register: frpc_server_name
+
+        - name: check {{ server_name }} 是否已添加
+          shell: grep {{ server_name }} {{frpc_config}} -c | cat
+          register: server_name_count
+
+        # 最新版，采用统一的service地址
+        - name: add {{ server_name }} proxy
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{frpc_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{server_name}}"
+            block: |
+              [{{ inventory_hostname }}_{{server_address}}]
+              type = http
+              local_ip = 10.43.10.20
+              local_port = 8080
+              use_compression = true
+              custom_domains = {{server_name}}
+          when:
+            - frpc_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+            - check_k3s_port.stdout == "success"
+
+        # 老版，采用内网nginx端口
+        - name: add {{ server_name }} proxy
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{frpc_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{server_name}}"
+            block: |
+              [{{ inventory_hostname }}_{{server_address}}]
+              type = http
+              local_ip = {{nginx_host}}
+              local_port = {{internal_port}}
+              use_compression = true
+              custom_domains = {{server_name}}
+          when:
+            - frpc_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+            - check_k3s_port.stdout == "error"
+            - check_internal_port.stdout == "success"
+
+        # reload frpc
+        - name: reload config
+          become: yes
+          become_method: sudo
+          shell: systemctl reload frpc
+          when:
+            - frpc_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+
+        # 已映射，获取已映射地址
+        - name: set proxy address variable
+          set_fact:
+            proxy_address: "{{ server_name }}"
+          when:
+            - frpc_server_name.stdout|int > 0 or server_name_count.stdout|int > 0
+
+      when:
+        - frpc_status.rc == 0
+
+    # 如果部署的是 safe_agent，则按照以下执行
+    - block:
+        - name: check {{ server_address }} 是否已添加
+          shell: grep {{ server_address }} {{safe_agent_config}} -c | cat
+          register: safe_agent_server_name
+
+        - name: check {{ server_name }} 是否已添加
+          shell: grep {{ server_name }} {{safe_agent_config}} -c | cat
+          register: server_name_count
+
+        # 采用k3s 统一的内网service地址
+        - name: add {{ server_name }} proxy
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{safe_agent_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{server_name}}"
+            block: |
+              [{{ inventory_hostname }}_{{server_address}}]
+              type = http
+              local_ip = 10.43.10.20
+              local_port = 8080
+              use_compression = true
+              custom_domains = {{server_name}}
+          when:
+            - safe_agent_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+            - check_k3s_port.stdout == "success"
+
+        # 采用内网nginx端口
+        - name: add {{ server_name }} proxy
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{safe_agent_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{server_name}}"
+            block: |
+              [{{ inventory_hostname }}_{{server_address}}]
+              type = http
+              local_ip = {{nginx_host}}
+              local_port = {{internal_port}}
+              use_compression = true
+              custom_domains = {{server_name}}
+          when:
+            - safe_agent_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+            - check_k3s_port.stdout == "error"
+            - check_internal_port.stdout == "success"
+
+        - name: reload safe_agent config
+          become: yes
+          become_method: sudo
+          shell: systemctl reload safe_agent
+          when:
+            - safe_agent_server_name.stdout|int == 0
+            - server_name_count.stdout|int == 0
+
+        - name: set proxy address variable
+          set_fact:
+            proxy_address: "{{ server_name }}"
+          when:
+            - safe_agent_server_name.stdout|int > 0 or server_name_count.stdout|int > 0
+
+      when:
+        - frpc_status.rc != 0
+        - safe_agent_status.rc == 0
+# 输出结果
+- name: Output Results
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tags: add
+  tasks:
+    # 输出结果，已映射输出已映射地址，为映射，输出新映射地址，
+    - name: 输出已映射地址
+      debug:
+        msg: "{{server_address}} 映射地址为: http://{{hostvars[groups['safe_agent_hosts'][0]]['proxy_address']}}"
+      when:
+        - groups['safe_agent_hosts'] | length == 1
+        - hostvars[groups['safe_agent_hosts'][0]]['proxy_address'] is defined
+
+    - name: 输出新映射地址
+      debug:
+        msg: "{{server_address}} 映射地址为: http://{{hostvars[nginx_host]['server_name']}}"
+      when:
+        - groups['safe_agent_hosts'] | length == 1
+        - hostvars[groups['safe_agent_hosts'][0]].proxy_address is undefined

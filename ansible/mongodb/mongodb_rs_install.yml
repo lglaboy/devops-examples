@@ -1,0 +1,125 @@
+# Date: 2023-04-03 16:06
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署mongodb副本集，1主2从，三节点
+# Version: v1.0
+
+
+- name: install mongo Replication
+  remote_user: swift
+  hosts: mongo_rs_host
+#  gather_facts: False
+  vars:
+    port: 27017
+  tasks:
+  # 判断主机组个数
+  - name: Check the number of host groups
+    fail:
+      msg: "ERROR: 主机数量不等于3,请检查主机组"
+    when:  groups['mongo_rs_host']|length != 3
+  
+  # 检查主机端口是否占用
+  - name: 检查{{port}}端口是否使用
+    shell: nc -z 0.0.0.0 {{ port }};echo $?
+    register: port_status
+    ignore_errors: True
+  
+  # 等于0，表示通，被占用
+  - name: 检查端口是否占用
+    fail:
+      msg: "ERROR: {{item}} 主机 端口 {{port}} 被占用,请修改变量port的值. -e port=27018"
+    when: hostvars[item]['port_status']['stdout']|int == 0
+    with_items:
+      - "{{groups['mongo_rs_host']}}"
+
+  - name: mkdir
+    raw: mkdir /opt/mongos/{data,logs,conf} -p && chmod 777 /opt/mongos/{data,logs}
+    ignore_errors: True
+  
+  # 判断是否有镜像
+  - name: check docker image
+    shell: docker images |awk '{print $1":"$2}' | grep -c swr.cn-east-2.myhuaweicloud.com/common-server/mongo:4.0.17 |cat
+    register: image_status
+  - block:
+    - name: scp package to remote
+      local_action: command scp /home/swift/packages/mongo_docker.tar {{ inventory_hostname }}:/tmp
+    - name: install packages
+      raw: cd /tmp/ && docker load < mongo_docker.tar
+    when: image_status.stdout|int != 1  
+  - name: 创建密钥文件
+    shell: |
+      echo "B0mW8k8hQV5XkeyhjTBZHkPFwqLDMUJ8UDAxj2s3vuX1roaTzhERERuUuENp42fc
+      zEFlen6krwFVbqmLAj6G1Vf8tqKIM39/9iq1d0xZv8dU9UIarfDexrouWOtjB1Db
+      2VK5o3p7J2xPBP8mY3DpUdHGXCUIAFPH8w9zJAPLh7IdStIbn2YBqwRJXpa08Wib
+      WD0/KExByrjaFb2uhqSjVODRp8SsRRl2MUesPxWauc5H6rThs8tfcx/fd8u/glDz
+      HiI6absQgQAplBF2N8L6hxkdWIqakm8IYnGY5Y00f76FvKymnFrEFLuwdzI986UC
+      g8JFfbWKm50mlwLFFn0dxojC/8KQ9aWD21D9RIALdShTRFGX2bGgdM9tpPaXVyLC
+      qh5NUAuSCmyMp71kyjlh/1E/PBXh558YVha/R295ZJEqN6p5kYGZYQWaT4MVAP7G
+      i5kwtfROYBtbPWFo8BbcqoLkO3ByR9UGZAG2PUfcf86zWn9wNKsBpjKeODWpaxni
+      hdETc5bNInP54/hDsXbLtRz9H6l4OyL56f8ooncMGiwY4vtnlH0dSpsewxNwLbr5
+      6/+bQAkBbonwML/t/UXm6qBWuGD2ajzHRp5iMt2pKvezQhmPTnX8HlhNPiDv6TrD
+      ZQTv+R83GjpXEOTO1/aqFEK/3x3p8n3eae2Jh7aEcX5OqWyHs/X0JzhLReoRMdu1
+      AOe9E1avuI46oK0FJfHQg7Exi0mfny3DYuCF3ldpp3F5woT7BRb0WXMvuDxWveiY
+      /ExsHNMUYEE1SKLwB7Te5eOHwL/gv0FvUtvh1bk82BW1Rd7G1KhKEOCpL9yNpdNH
+      dQX0T1XWsqeMUrerD3qVLV40EBFBZTG1NiBI1Fqtz0KIPhAsNw/pzZAJTejNbrId
+      BKxyrDEFeA55zjvwqsYDnEB/q2BnJITy3hdkrn7Ax4kjQIK0B/iwurTbsBasUJXv
+      rOIfxyLlh3X2uscWN2VbiV4RlDLN" |sudo tee /opt/mongos/conf/mongodb-keyfile
+  - name: 密钥文件授权
+    shell: sudo chmod 600 /opt/mongos/conf/mongodb-keyfile && sudo chown 999.999 /opt/mongos/conf/mongodb-keyfile
+  - name: 创建配置文件
+    blockinfile:
+      path: /opt/mongos/conf/mongod.conf
+      create: yes
+      backup: yes
+      marker: "# {mark} ANSIBLE MANAGED BLOCK mongod.conf"
+      block: |
+        replication:
+          replSetName: "rs0"
+        storage:
+          dbPath: /var/lib/mongodb
+          journal:
+            enabled: true
+        systemLog:
+          destination: file
+          logAppend: true
+          path: /var/log/mongodb/mongod.log
+        net:
+          port: {{ port }}
+          bindIp: 0.0.0.0
+        processManagement:
+          timeZoneInfo: /usr/share/zoneinfo
+        security:
+          keyFile: /etc/conf/mongodb-keyfile
+          authorization: enabled
+  # 检查hosts中是否已经存在解析
+  - name: check hosts
+    shell: grep local-mongo-00[1-3] /etc/hosts -c | cat
+    register: mongo_hosts
+  - name: 配置hosts
+    shell: echo "{{ hostvars[item.0]['ansible_default_ipv4']['address'] }}    {{ item.1 }}" | sudo tee -a /etc/hosts
+    with_together:
+      - "{{groups['mongo_rs_host']}}"
+      - ['local-mongo-001','local-mongo-002','local-mongo-003']
+    when: mongo_hosts.stdout|int == 0
+  - name: 替换hosts
+    shell: sudo sed -i 's#\(.*\)\({{ item.1 }}\)#{{ hostvars[item.0]['ansible_default_ipv4']['address'] }}    \2#g' /etc/hosts
+    # shell: echo "{{ hostvars[item.0]['ansible_default_ipv4']['address'] }}    {{ item.1 }}" | sudo tee -a /etc/hosts
+    with_together:
+      - "{{groups['mongo_rs_host']}}"
+      - ['local-mongo-001','local-mongo-002','local-mongo-003']
+    when: mongo_hosts.stdout|int == 3
+    
+  # 从/etc/hosts中获取匹配IP的mongo解析名字，用于docker启动，或者直接mongo也行
+  - name: get mongo name
+    shell: grep local-mongo-00[1-3] /etc/hosts |grep $(hostname -I|awk '{print $1}')|awk '{print $NF}'
+    register: docker_name
+  - name: start mongo
+    shell: docker run -itd --name {{ docker_name.stdout }} -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/mongos/conf:/etc/conf -v /opt/mongos/data:/var/lib/mongodb -v /opt/mongos/logs:/var/log/mongodb/ --net="host"  --cap-add=SYS_PTRACE --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 --memory-swappiness=0 swr.cn-east-2.myhuaweicloud.com/common-server/mongo:4.0.17 -f /etc/conf/mongod.conf
+
+  ### 初始化
+  - name: init rs
+    shell: sleep 10 && docker exec -it {{ docker_name.stdout }} mongo admin --port {{ port }} --eval "rs.initiate({_id:'rs0',members:[{_id:0,host:'local-mongo-001:{{ port }}'},{_id:1,host:'local-mongo-002:{{ port }}'},{_id:2,host:'local-mongo-003:{{ port }}'}]})"
+    when: docker_name.stdout == "local-mongo-001"
+  - name: set passwd
+    shell: sleep 60 && docker exec -it {{ docker_name.stdout }} mongo admin --port {{ port }} --eval "db.createUser({user:'root', pwd:'mongopassword', roles:['root']})"
+    when: docker_name.stdout == "local-mongo-001"

@@ -1,0 +1,197 @@
+# Date: 2024-12-23 10:19
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新已部署的autoheal_exporter服务，v3 -> v4
+# Version: v1.0
+
+# 1.批量更新所有主机
+# ansible-playbook autoheal_exporter_update_v4.yml
+# 2.更新指定环境主机
+# ansible-playbook autoheal_exporter_update_v4.yml -e env_name='xxxxxxxx-prod'
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    new_docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_exporter:v4
+    download_image_name: autoheal_exporter_v4.tgz
+    log_file: /tmp/autoheal_update_info.csv
+    env_name: None
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+    # 生成打包文件
+    - name: 检查本地文件 /tmp/{{download_image_name}}
+      stat:
+        path: /tmp/{{download_image_name}}
+      register: image_file_status
+
+    - block:
+        - name: 本地下载镜像 {{new_docker_image}}
+          shell: docker pull {{new_docker_image}}
+        - name: 本地打包镜像 -> /tmp/{{download_image_name}}
+          shell: docker save {{new_docker_image}} | gzip > /tmp/{{download_image_name}}
+      when:
+        - image_file_status.stat.isreg is undefined
+
+    # 获取主机
+    - name: get all hosts
+      shell: |
+        if [ "{{ env_name }}" = "None" ]; then
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+        else
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+        fi
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: autoheal_exporter_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 更新autoheal_exporter
+- name: update autoheal_exporter
+  hosts: autoheal_exporter_hosts
+  gather_facts: False
+  vars:
+    old_docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_exporter:v3
+    new_docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_exporter:v4
+    download_image_name: autoheal_exporter_v4.tgz
+    log_file: /tmp/autoheal_update_info.csv
+  tasks:
+    - name: Check to see if autoheal_exporter is installed
+      shell: timeout 10 docker ps -a | grep -c autoheal_exporter | cat
+      register: autoheal_register
+
+    - block:
+        - name: Check autoheal_exporter image
+          shell: docker images |awk '{print $1":"$2}' | grep -c {{new_docker_image}} | cat
+          register: autoheal_image_register
+
+        # 传包策略
+        - block:
+            # 从云上下载
+            # - name: download image for cloud http
+            #   shell: wget -q -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
+            #   delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+            # 从镜像仓库下载
+            - name: APP-001 机器下载镜像
+              shell: |
+                #!/bin/bash
+                set -e
+                if docker images |awk '{print $1":"$2}' |grep -c {{new_docker_image}} >/dev/null 2>&1; then
+                  :
+                else
+                  docker pull {{new_docker_image}}
+                  docker save {{new_docker_image}} > /tmp/{{download_image_name}}
+                fi
+              when: "'-APP-001' in inventory_hostname"
+
+            - name: 通过APP-001将下载镜像传输到目标机器
+              shell: |
+                #!/bin/bash
+                set -e
+                if test -f /tmp/{{download_image_name}}; then
+                  scp -o PasswordAuthentication=no -o StrictHostKeyChecking=no /tmp/{{download_image_name}} {{inventory_hostname}}:/tmp
+                fi
+              delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+              when: "'-APP-001' not in inventory_hostname"
+
+            - name: load image
+              shell: docker load -i /tmp/{{download_image_name}}
+          when: autoheal_image_register['stdout']|int == 0
+          rescue:
+            # 从本地scp到目标主机
+            - name: scp image to remote
+              local_action: command scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{ inventory_hostname }}:/tmp
+            - name: load image
+              shell: docker load -i /tmp/{{download_image_name}}
+
+        - name: 创建目录
+          shell: if ! test -d /opt/autoheal_exporter;then mkdir /opt/autoheal_exporter -p;fi
+          ignore_errors: true
+          register: create_dir_status
+
+        - name: 创建目录(root权限)
+          become: yes
+          become_method: sudo
+          shell: if ! test -d /opt/autoheal_exporter;then mkdir /opt/autoheal_exporter -p;fi
+          when: create_dir_status.failed == true
+
+        # 获取docker api version
+        # docker version -f '{{.Server.APIVersion}}'
+        - name: get docker api version
+          shell: docker version -f {{ '{{' }}.Server.APIVersion{{ '}}' }}
+          register: docker_api_version
+
+        - name: 创建配置文件
+          copy:
+            content: |
+              server:
+                # docker api 版本
+                docker_api_version: {{docker_api_version['stdout']}}
+                # 检查间隔 (s)
+                interval: 5
+                # 指数退避基本时间 s
+                base_backoff: 10
+                # 指数退避最大时间 s
+                maximum_backoff: 300
+                # 重置回退时间 s
+                reset_backoff: 600
+            dest: /opt/autoheal_exporter/config.yml
+            mode: 0644
+          ignore_errors: true
+          register: create_config_file_status
+
+        - name: 创建配置文件(root)
+          become: yes
+          become_method: sudo
+          copy:
+            content: |
+              server:
+                # docker api 版本
+                docker_api_version: {{docker_api_version['stdout']}}
+                # 检查间隔 (s)
+                interval: 5
+                # 指数退避基本时间 s
+                base_backoff: 10
+                # 指数退避最大时间 s
+                maximum_backoff: 300
+                # 重置回退时间 s
+                reset_backoff: 600
+            dest: /opt/autoheal_exporter/config.yml
+            mode: 0644
+          when: create_config_file_status.failed == true
+
+        - name: delete autoheal_exporter
+          shell: docker rm -f autoheal_exporter
+        # - name: delete old autoheal_exporter image
+        #   shell: docker rmi {{old_docker_image}}
+
+        - name: create autoheal_exporter
+          shell: |
+            docker run -d --name autoheal_exporter \
+            --cpus 1 -m 2G \
+            --restart=unless-stopped \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /opt/autoheal_exporter/config.yml:/config.yml \
+            {{new_docker_image}} -c /config.yml
+        - name: 输出结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},autoheal_exporter 已更新,{{docker_api_version['stdout']}}" >> "{{ log_file }}"
+      when:
+        - autoheal_register['stdout']|int == 1
+
+    - name: 输出结果
+      connection: local
+      shell: echo "{{ inventory_hostname }},autoheal_exporter 不存在," >> "{{ log_file }}"
+      when:
+        - autoheal_register['stdout']|int == 0

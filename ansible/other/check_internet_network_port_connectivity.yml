@@ -1,0 +1,22 @@
+- name: check Internet network port connectivity
+  remote_user: swift
+  hosts: check_internet_network_port_host
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_internet_network.log
+  tasks:
+    - name: scp shell script
+      local_action: shell scp /tmp/check_internet_network_port.sh {{ inventory_hostname }}:/tmp/
+    - name: execute script
+      shell: bash /tmp/check_internet_network_port.sh | sort -k 4
+      register: check_internet_port_register
+    - name: delete shell script
+      shell: rm -rf /tmp/check_internet_network_port.sh
+    - name: output info to local
+      local_action: shell echo "{{ inventory_hostname }}" > "{{ log_file }}_{{ inventory_hostname|lower }}" && echo "{{ check_internet_port_register.stdout }}" >> "{{ log_file }}_{{ inventory_hostname|lower }}"
+    - name: grep failed 
+      local_action: shell grep -E "APP|failed" "{{ log_file }}_{{ inventory_hostname|lower }}"
+      register: error_info
+    - name: 访问失败
+      debug:
+        var: error_info['stdout_lines']

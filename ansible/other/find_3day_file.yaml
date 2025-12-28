@@ -1,0 +1,8 @@
+- name: find 3day file
+  remote_user: swift
+  hosts: 3day_file_host
+  gather_facts: False
+
+  tasks:
+    - name: find 3day update file to tmp
+      shell: nohup sudo find / -mtime -3 -type f -exec stat -c "mtime %y %n" {}  \; -exec stat -c "ctime %z %n" {} \; > /tmp/3day_file.list &

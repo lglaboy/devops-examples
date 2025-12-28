@@ -1,0 +1,184 @@
+# Date: 2024-01-04 14:00
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署swiftwaf容器
+# Version: v1.0
+- name: clean env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    local_log_file: /tmp/sync_nginx_host.log
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ local_log_file }} ];then mv {{ local_log_file }} {{ local_log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+- name: 内网nginx部署docker
+  hosts: SyncHost
+  remote_user: swift
+  gather_facts: False
+  vars:
+    internal_port: 8080
+    old_waf_image: swr.cn-east-2.myhuaweicloud.com/common-server/swiftwaf:15
+    waf_image: swr.cn-east-2.myhuaweicloud.com/common-server/swiftwaf:1
+    download_image_name: docker_image_swiftwaf_1.tgz
+    local_log_file: /tmp/sync_nginx_host.log
+  tasks:
+    # 判断目标机器上镜像是否存在
+    - name: 检查 swiftwaf 镜像是否存在
+      shell: docker images |awk '{print $1":"$2}'|grep -c "^{{ waf_image }}$" | cat
+      register: check_waf_image
+    # 通过app-001从公司访问，然后，通过app-001 传包到目标机器
+    - block:
+        # 从云上下载
+        # - name: download image for cloud http
+        #   shell: wget -q -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
+        #   delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        # 从镜像仓库下载
+        - name: download image for swr
+          shell: docker pull {{waf_image}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: save image to /tmp
+          shell: docker save {{waf_image}} > /tmp/{{download_image_name}}
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: scp image to remote
+          shell: scp -o PasswordAuthentication=no /tmp/{{download_image_name}} {{inventory_hostname}}:/tmp
+          delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
+
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+      when: check_waf_image['stdout']|int == 0
+      rescue:
+        - name: scp image to remote
+          local_action: command scp -o PasswordAuthentication=no /home/swift/packages/{{download_image_name}} {{ inventory_hostname }}:/tmp
+        - name: load image
+          shell: docker load -i /tmp/{{download_image_name}}
+
+    # 创建容器
+    # 检查是否存在创建的容器
+    - name: 检查 swiftwaf 容器是否创建
+      shell: docker ps -a | awk '{print $NF}' | grep "^swiftwaf$" -c | cat
+      register: check_waf_container
+
+    - name: 检查相关挂载目录是否存在
+      # 存在/etc/nginx/ssl不存在机器 && test -d /etc/nginx/ssl
+      shell: test -d /var/log/nginx && test -d /etc/nginx/conf.d
+      register: check_mount_dir
+      ignore_errors: true
+      when:
+        - check_waf_container['stdout']|int == 0
+
+    # 不存在，则创建
+    # 判断挂载目录是否存在
+    # 创建容器
+    - name: 创建 swiftwaf 容器
+      shell: |
+        docker create -it --name swiftwaf \
+        --net=host \
+        --cpus 2 -m 4G \
+        --restart=unless-stopped \
+        --memory-swappiness=0 \
+        --log-opt max-size=512m \
+        --log-opt max-file=3 \
+        -v /etc/hosts:/etc/hosts \
+        -v /etc/localtime:/etc/localtime \
+        -v /etc/nginx/conf.d:/etc/nginx/conf.d \
+        -v /etc/nginx/ssl:/etc/nginx/ssl \
+        -v /var/log/nginx:/var/log/nginx \
+        {{ waf_image }}
+      when:
+        - check_waf_container['stdout']|int == 0
+        - check_mount_dir.rc == 0
+
+    # 存在，则更新
+
+    # 更新created的镜像
+    # 对于容器存在的，判断是否状态为 created
+    #  docker inspect swiftwaf --format={{.State.Status}}
+    - name: 检查创建的容器状态
+      # 存在/etc/nginx/ssl不存在机器 && test -d /etc/nginx/ssl
+      shell: docker inspect swiftwaf --format={{ '{{' }}.State.Status{{ '}}' }}
+      register: container_status
+      when:
+        - check_waf_container['stdout']|int == 1
+    # 如果是created | exited，进行更新
+    # 创建新的容器
+    - name: 检查 nginx 模板文件是否存在
+      shell: test -f /etc/nginx/nginx.conf.template
+      register: check_nginx_conf_template
+      ignore_errors: true
+
+    - name: nginx 模板文件存在, 进行删除
+      file:
+        path: /etc/nginx/nginx.conf.template
+        state: absent
+      become: yes
+      when: check_nginx_conf_template.rc == 0
+
+    - name: 检查 swiftwaf 老镜像是否存在
+      shell: docker images |awk '{print $1":"$2}'|grep -c "^{{ old_waf_image }}$" | cat
+      register: check_old_waf_image
+
+    - block:
+        # 删除容器
+        - name: 删除 swiftwaf 容器
+          shell: docker rm -f swiftwaf
+
+        # 创建新的容器
+        - name: 创建 swiftwaf 容器
+          shell: |
+            docker create -it --name swiftwaf \
+            --net=host \
+            --cpus 2 -m 4G \
+            --restart=unless-stopped \
+            --memory-swappiness=0 \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /etc/nginx/conf.d:/etc/nginx/conf.d \
+            -v /etc/nginx/ssl:/etc/nginx/ssl \
+            -v /var/log/nginx:/var/log/nginx \
+            {{ waf_image }}
+
+        # 清理旧的镜像
+        # 删除容器
+        - name: 删除 swiftwaf 镜像
+          shell: docker rmi {{ old_waf_image }}
+          when:
+            - check_old_waf_image['stdout']|int == 1
+      when:
+        - check_waf_container['stdout']|int == 1
+        - container_status.stdout == "created" or container_status.stdout == "exited"
+
+    # 输出结果
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},未更新,swiftwaf容器已启动" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 1
+        - container_status.stdout == "running"
+
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},已更新,swiftwaf容器未启动" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 1
+        - container_status.stdout == "created" or container_status.stdout == "exited"
+
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},已创建,swiftwaf容器不存在" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 0
+        - check_mount_dir.rc == 0
+    - name: 输出结果
+      shell: echo "{{inventory_hostname}},未创建,swiftwaf容器挂载目录不存在" >> {{local_log_file}}
+      connection: local
+      when:
+        - check_waf_container['stdout']|int == 0
+        - check_mount_dir.rc != 0

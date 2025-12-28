@@ -1,0 +1,108 @@
+- name: get common_hosts ssh to proxy_hosts
+  remote_user: swift
+  hosts: common_host
+  gather_facts: False
+  vars:
+  tasks:
+    - name: 检查主机磁盘数量
+      raw: lsblk | grep disk | wc -l
+      register: disk_info
+      tags: check_disk
+    - fail:
+        msg: 主机磁盘数量大于两块，请手动处理;--skip-tags check_disk;
+      when: disk_info.stdout_lines[0] > "1"
+      tags: check_disk
+    - name: check host config
+      raw: uname -m
+      register: return_value
+    - name:
+      raw: echo  {{ return_value.stdout }}
+    - fail:
+        msg: 'not X86'
+      when: ( 'x86_64' not in  return_value.stdout  )
+
+- name: get common_hosts ssh to proxy_hosts
+  remote_user: swift
+  hosts: common_host
+  gather_facts: False
+  vars:
+  tasks:
+  - name: remove ssh file
+    local_action: raw sudo rm -rf /tmp/remote_ssh_config
+  - name: add config
+    local_action: raw cat /etc/ssh/ssh_config |grep -E 'Host.*{{ inventory_hostname }}' -A 3 >> /tmp/remote_ssh_config
+
+
+- name: local remove remote_ssh_config
+  hosts: proxy_host
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: cp ssh_config_file to proxy_host
+      local_action: raw scp /tmp/remote_ssh_config {{ inventory_hostname }}:/tmp/remote_ssh_config
+    - name: deploy config
+      raw: cat /tmp/remote_ssh_config >> /home/swift/.ssh/config
+    - name: delete localssh file
+      raw: sed -i '/{{ inventory_hostname }}/,+3d' /home/swift/.ssh/config
+    - name: add localssh file
+      raw: printf "\n%s\n%s\n%s\n%s" "Host {{ inventory_hostname }}" "HostName    127.0.0.1" "Port    22" "User    swift" >>  /home/swift/.ssh/config
+    - name: check_ssh_key
+      raw: find /home/swift/.ssh -name id_rsa.pub|wc -l
+      register: ssh_key_exit
+    - name: create_ssh_key
+      raw: sudo chown swift ~/.ssh && ssh-keygen -t rsa -P "" -f ~/.ssh/id_rsa
+      when: ( ssh_key_exit['stdout_lines'][0] == '0' )
+    - name: cp ssh_key to local
+      local_action:  command scp {{ inventory_hostname }}:/home/swift/.ssh/id_rsa.pub /tmp/remote_pub.key
+    - name: change ssh config
+      raw: echo 'StrictHostKeyChecking no' | sudo tee -a /etc/ssh/ssh_config
+
+- name: install packages
+  remote_user: swift
+  hosts: common_host
+  gather_facts: False
+  vars:
+  tasks:
+  - name: set hostname
+    raw:  sudo hostnamectl set-hostname {{ inventory_hostname }}
+  - name: set hostname hosts
+    raw:  echo '127.0.0.1    {{ inventory_hostname }}' |sudo tee -a /etc/hosts
+  - name: scp proxy key file
+    local_action:  command scp /tmp/remote_pub.key {{ inventory_hostname }}:/tmp/
+    ignore_errors: True
+  - name: add key
+    raw: mkdir /home/swift/.ssh/ -p && cat /tmp/remote_pub.key >> /home/swift/.ssh/authorized_keys
+    ignore_errors: True
+  # - name: scp source file
+  #   local_action:  command scp /home/swift/packages/common.tar {{ inventory_hostname }}:/tmp
+  #   ignore_errors: True
+  # - name: install packages
+  #   raw: cd /tmp/ && sudo rm -rf archives && tar -xvf common.tar && cd archives && sudo dpkg -i *.deb
+  #   ignore_errors: True
+  - name: scp redis-cli file
+    local_action:  command scp /home/swift/packages/redis-cli {{ inventory_hostname }}:/tmp/
+    ignore_errors: True
+  - name: install redis-cli
+    raw: chmod 777 /tmp/redis-cli && sudo mv /tmp/redis-cli /usr/local/bin/
+  - name: change time zone
+    raw: sudo ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+  # - name: get jenkins host datetime
+  #   local_action: raw date +"%Y-%m-%d %H:%M:%S"
+  #   register: result
+  # - name: sync date
+  #   raw: sudo date -s {{ '"{}"'.format(result.stdout_lines[0]) }}
+  # TODO: 安装htpdata命令
+  - name: echo crontab
+    raw: (crontab -l;echo '01 * * * * sudo htpdate -s -t local-gateway:80') |crontab
+
+- name: scp
+  remote_user: swift
+  hosts: proxy_host
+  gather_facts: False
+  tasks:
+  - name: rm local /tmp/remote_ssh_config
+    local_action: raw rm -rf /tmp/remote_ssh_config
+  - name: rm  remote /tmp/remote_ssh_config
+    raw: rm -rf /tmp/remote_ssh_config
+  - name: rm  /tmp/remote_pub.key
+    local_action: raw rm -rf /tmp/remote_pub.key

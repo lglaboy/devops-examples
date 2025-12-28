@@ -1,0 +1,75 @@
+# Date: 2023-04-04 19:10
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 统计nginx访问地址，检查是否是静态站点
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_server_name_check.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: nginx_server_name_check_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: get nginx http http_address
+  hosts: nginx_server_name_check_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_server_name_check.csv
+  tasks:
+    # 判断是否有nginx，有nginx，修改nginx配置生效，无nginx，直接跳过
+    # 1.存在nginx进程运行
+    # 2.存在nginx.conf文件
+    - name: 检查nginx进程是否存在
+      shell: pgrep -c nginx | cat
+      register: nginx_process_status
+    - block:
+      - name: 拼接地址
+        shell: |
+          for f in /etc/nginx/conf.d/*.conf
+          do
+              [[ -e "$f" ]] || break
+              for server_name in $(grep -E "server_name" $f|grep -v -E "^\s+#|^#"|awk -F ';' '{print $1}'|awk  '{for (i=2;i<=NF;i++)print($i" ")}')
+              do
+                  [[ $server_name == "_" ]] || [[ $server_name == "-" ]] && break
+                  for port in $(grep -E listen $f|grep -v -E "^\s+#|^#"|grep -v ssl|awk -F ';' '{print $1}'|awk '{print $2}')
+                  do
+                      echo "http://$server_name:$port"
+                  done
+
+                  for port in $(grep -E listen $f|grep -v -E "^\s+#|^#"|grep ssl|awk -F ';' '{print $1}'|awk '{print $2}')
+                  do
+                      echo "https://$server_name:$port"
+                  done
+              done
+          done
+        args:
+          executable: /bin/bash
+        register: http_address
+        # when:
+        #   - nginx_process_status['stdout']|int > 0
+      
+      - name: 输出http地址到本地
+        connection: local
+        shell: echo "{{ inventory_hostname }},{{ item }}" >> "{{ log_file }}"
+        with_items:
+          - "{{ http_address.stdout_lines }}"
+      when:
+        - nginx_process_status['stdout']|int > 0

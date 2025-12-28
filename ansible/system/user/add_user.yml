@@ -1,0 +1,47 @@
+# Date: 2024-05-06 10:30
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: ubuntu系统，创建sudo用户
+# Version: v1.0
+
+# 存在默认用户及密码，默认添加sudo权限
+# 指定新增用户和密码
+# -e "username='xxxxx' password='xxxxx'"
+
+
+- name: ubuntu system add user {{username}}
+  hosts: add_user_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/add_user_list.csv
+    username: ubuntu
+    password: userpassword
+  tasks:
+    - name: 判断操作系统
+      shell: lsb_release -i | awk '{print $NF}'
+      register: system_id
+    - name: 判断用户 {{username}} 是否存在
+      shell: id {{ username }}
+      ignore_errors: true
+      register: user_status
+    - block:
+      - name: 新增用户 {{username}}
+        shell: sudo useradd -m -s /bin/bash {{username}}
+      - name: 设置用户 {{username}} 密码
+        shell: echo '{{ username }}:{{ password }}' | sudo chpasswd
+        register: update_status
+      - name: 添加sudo权限
+        shell: sudo usermod -aG sudo {{username}}
+      - name: 输出成功添加日志
+        local_action: shell echo "$(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},{{ password }},已创建" >> "{{ log_file }}"
+        when: update_status.rc == 0
+      - name: 输出用户密码设置失败日志
+        local_action: shell echo "%(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},{{ password }},已创建(密码设置失败)" >> "{{ log_file }}"
+        when: update_status.rc != 0
+      when:
+        - system_id['stdout'] == 'Ubuntu'
+        - user_status.rc|int != 0
+    - name: 输出未创建用户日志
+      local_action: shell echo "$(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},{{ password }},未创建(用户已存在)" >> "{{ log_file }}"
+      when: user_status.rc == 0

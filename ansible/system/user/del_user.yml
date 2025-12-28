@@ -1,0 +1,41 @@
+# Date: 2024-05-06 10:30
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: ubuntu系统，删除指定用户
+# Version: v1.0
+
+# 指定用户
+# -e username='xxxxx'
+
+- name: ubuntu system delete user {{username}}
+  hosts: del_user_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/del_user_list.csv
+    username: ubuntu
+  tasks:
+    - name: 判断操作系统
+      shell: lsb_release -i | awk '{print $NF}'
+      register: system_id
+    - name: 判断用户 {{username}} 是否存在
+      shell: id {{ username }}
+      ignore_errors: true
+      register: user_status
+    - block:
+      - name: 删除用户 {{username}}
+        shell: sudo userdel -r {{username}}
+        ignore_errors: true
+        register: delete_status
+      - name: 输出删除成功日志
+        local_action: shell echo "$(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},已删除" >> "{{ log_file }}"
+        when: delete_status.rc == 0
+      - name: 输出删除失败日志
+        local_action: shell echo "%(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},未删除({{delete_status.stderr}})" >> "{{ log_file }}"
+        when: delete_status.rc != 0
+      when:
+        - system_id['stdout'] == 'Ubuntu'
+        - user_status.rc|int == 0
+    - name: 输出未创建用户日志
+      local_action: shell echo "$(date +"%F %R:%S"),{{ inventory_hostname }},{{ username }},未删除(用户不存在)" >> "{{ log_file }}"
+      when: user_status.rc != 0

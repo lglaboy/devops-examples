@@ -1,0 +1,22 @@
+- name: update hosts files
+  remote_user: swift
+  hosts: update_hosts_file_hosts
+  gather_facts: False
+
+  tasks:
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbok -i hosts update_hosts_file.yml -e hosts_alias='local-pg-slave' -e hosts_ip='192.168.10.101'"
+      when: hosts_alias is not defined or hosts_ip is not defined
+    - name: scp source file
+      copy:
+        src: /home/swift/devops/Autoinstall/shell/update_hosts_file.sh
+        dest: /tmp/
+
+    - name: Execute modification script
+      raw: sudo /bin/bash /tmp/update_hosts_file.sh {{ hosts_alias }} {{ hosts_ip }}
+
+    - name: delete script
+      file:
+        path: /tmp/update_hosts_file.sh
+        state: absent

@@ -1,0 +1,101 @@
+# 用于调远程ansible-api接口的脚本
+- name: pull_file
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: yes
+  become_user: jenkins
+  become_method: sudo
+  tasks:
+    - name: pull
+      tags: deploy
+      shell: cd /var/lib/jenkins/devops/ && git pull
+
+- name: build_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: build # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - name: notified task starting
+      tags: build
+      command: /opt/tools/venv/bin/python /opt/tools/console.py -m alarm -t DingTalkBuild -i {{ job_name }} {{ build_num }} {{ env_name }} {{ node_name }} {{ git_branch }} {{ git_commit }}
+      when: ( env_name.split('-')[-1] == 'prod')
+    - name: build job
+      tags: build
+      command: /var/lib/jenkins/devops/BaseBuild.sh {{ build_dir }} {{ devops_job_dir }} {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }}  {{ default_RegistryUrl }}
+      retries: 2
+      delay: 3
+      register: result
+      until: result.rc == 0
+
+- name: deploy_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+    # default_AnsibleApiUrl: "http://192.168.1.200:8765"
+  tasks:
+    - name: deploy
+    # 需要将没有设置默认的变量全部传递过去，即添加到-e "这里"里面
+      shell: curl -X POST -s '{{ AnsibleApiUrl }}/command' -H 'cache-control:\ no-cache' -d '{ "n":"job1","m":"shell","a":"ansible-playbook -v -i /opt/ansible-api/hosts_ansible_api /opt/ansible-api/remote_deploy_ansible_api.yml -e \"build_dir='{{ build_dir|default(default_build_dir) }}' devops_job_dir='{{ devops_job_dir|default(default_devops_job_dir) }}' env_name='{{ env_name }}' job_name='{{ job_name }}' build_num='{{ build_num }}' JobAction='{{ JobAction }}' JobType='{{ JobType }}' JarPath='{{ JarPath|default(default_JarPath) }}' NodeVersion='{{ NodeVersion|default(default_NodeVersion) }}' envName='{{ envName|default(default_envName) }}' gatwayUrl='{{ gatwayUrl|default(default_gatwayUrl) }}' DockerCpu='{{ DockerCpu|default(default_DockerCpu) }}' DockerMem='{{ DockerMem|default(default_DockerMem) }}' ExposedPort='{{ ExposedPort|default(default_ExposedPort) }}' BaseDir='{{ BaseDir|default(default_BaseDir) }}' PomPath='{{ PomPath|default(default_PomPath) }}' DebugPort='{{ DebugPort|default(default_DebugPort) }}' CheckUrl='{{ CheckUrl|default(default_CheckUrl) }}' CheckTime='{{ CheckTime|default(default_CheckTime) }}' SkyWalking='{{ SkyWalking|default(default_SkyWalking) }}' SkyIP='{{ SkyIP|default(default_SkyIP) }}' RegistryUrl='{{ RegistryUrl|default(default_RegistryUrl) }}' node_name='{{ node_name }}' git_url='{{ git_url }}' git_branch='{{ git_branch }}' git_commit='{{ git_commit }}' jenkins_job_url='{{ jenkins_job_url }}'\"","t":"127.0.0.1","s":"99b2362bb59f930b6232160e079bde50"}'
+      register: check
+    - name: debug stdout
+      set_fact:
+        dataresult: "{{ check.stdout | from_json }}"
+    - name: save remote log to local
+      local_action:
+        module: copy
+        content: "{{ dataresult.detail['127.0.0.1'][0]['stdout'] }}"
+        dest: /tmp/{{ env_name }}_{{ job_name }}_{{ build_num }}.log
+    - name: cat remote ansible log
+      shell: cat /tmp/{{ env_name }}_{{ job_name }}_{{ build_num }}.log
+
+  # 定义失败
+    - fail:
+        msg: "ERROR: 服务升级失败，请查看日志详情。"
+      when: ( dataresult.rc != 0 )
+
+- name: build_jobs
+  tags: deploy
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    default_Action: deploy # build|deploy
+  tasks:
+    - name: data_archiving
+      shell: /opt/tools/venv/bin/python /opt/tools/console.py -m job -t insertjobinfo -i {{ job_name }} {{ env_name }} {{ build_num }} {{ JobType }} {{ Action|default(default_Action) }} swr.cn-east-2.myhuaweicloud.com/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }} {{ git_url }} {{ git_branch }} {{ git_commit }} {{ jenkins_job_url }} {{ groups.remote_host | list | join( ',' )}}
+      when: ( dataresult.rc == 0 )

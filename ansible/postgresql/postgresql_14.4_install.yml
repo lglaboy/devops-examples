@@ -1,0 +1,74 @@
+# Date: 2023-04-10 16:34
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 为 Ubuntu 18.04 安装 postgresql 14.4
+# Version: v1.0
+
+- name: install postgres
+  remote_user: swift
+  hosts: postgres_host
+  gather_facts: False
+  tasks:
+    - name: 判断操作系统
+      shell: lsb_release -c |awk '{print $NF}'
+      register: system_codename
+    - block:
+      - name: add postgres user
+        raw: sudo useradd -m -s /bin/bash postgres
+        ignore_errors: True
+      # 添加key，为了后续远程登陆免密，jumpserver等工具使用
+      - name: add ssh key 001
+        raw: sudo mkdir /home/postgres/.ssh/
+        ignore_errors: True
+      - name: add ssh key 002
+        raw: echo "ssh-rsa ssh公钥信息(~/.ssh/id_rsa.pub)" | sudo tee -a /home/postgres/.ssh/authorized_keys
+      - name: change power
+        raw: sudo chown postgres.postgres /home/postgres/.ssh -R
+      - name: scp package to remote
+        local_action: command scp /home/swift/packages/postgresql-14-bionic.tar {{ inventory_hostname }}:/tmp
+        tags: downloads
+      - name: install packages
+        raw: cd /tmp/ && sudo rm -rf archives && tar -xvf postgresql-14-bionic.tar && cd archives && sudo dpkg -i -G -E libpython2.7-minimal_*.deb python2.7-minimal_*.deb python-minimal_*.deb && sudo dpkg -i -G -E *.deb
+        ignore_errors: True
+      - name: mkdir data
+        raw: sudo mkdir /data/swdb -p && sudo mkdir -p /data/ssd && sudo mkdir -p /data/swdb/{data,tts,inactive} && sudo mkdir -p /data/ssd/{idx,active,tts}
+      - name: chown
+        raw: sudo chown postgres.postgres /data -R
+      - name: cp config to local
+        copy:
+          src: /home/swift/devops/Autoinstall/pgautoinstall_conf/
+          dest: /tmp/pgautoinstall_conf/
+      - name: get pg configfile
+        local_action: raw rm -rf /tmp/template_hos.dmp  && export PGPASSWORD=q1w2e3r4 && pg_dump -h 192.168.1.100 -d a1_template_hos -Fc -U postgres  > /tmp/template_hos.dmp
+      - name: cp config to local
+        copy:
+          src: /tmp/template_hos.dmp
+          dest: /tmp/pgautoinstall_conf/
+      - name: import config
+        raw: cd /tmp/pgautoinstall_conf && psql -d postgres -f ./create_obj.sql && pg_restore -d local_cloud -Fc template_hos.dmp && psql -d local_cloud -f ./grant.sql
+        become: yes
+        become_user: postgres
+        ignore_errors: True
+      - name: scp config file
+        copy:
+          src: /home/swift/devops/Autoinstall/postgres_conf_14/
+          dest: /tmp/postgres_conf/
+      - name: cp config
+        raw: sudo mkdir -p /etc/postgresql/14/main/ && sudo chown -R postgres:postgres /etc/postgresql &&  sudo cp -pr /tmp/postgres_conf/* /etc/postgresql/14/main/ && sudo chown -R postgres.postgres /etc/postgresql/14/main/
+
+      - name: set postgresql-14.service
+        raw: sudo mv /etc/postgresql/14/main/postgresql-14.service /lib/systemd/system/ && sudo chown root.root /lib/systemd/system/postgresql-14.service && sudo systemctl daemon-reload && sudo systemctl enable postgresql-14.service
+      - name: set pgcontrol to /usr/lib/postgresql/14/bin
+        raw: sudo mv /etc/postgresql/14/main/pgcontrol /usr/lib/postgresql/14/bin/ && sudo chown root.root /usr/lib/postgresql/14/bin/pgcontrol && sudo chmod a+x  /usr/lib/postgresql/14/bin/pgcontrol
+      - name: set /etc/profile
+        raw: sudo sed -i '$a\\n# postgresql\nPATH=/usr/lib/postgresql/14/bin:$PATH\nexport PATH' /etc/profile
+      - name: echo crontab
+        become: yes
+        become_user: postgres
+        raw: (crontab -l;echo '@reboot /usr/lib/postgresql/14/bin/pg_ctl -D /etc/postgresql/14/main restart') |crontab
+      - name: restart pg
+        become: yes
+        become_user: postgres
+        raw: /usr/lib/postgresql/14/bin/pg_ctl -D /etc/postgresql/14/main restart
+      when:
+        - system_codename['stdout'] == 'bionic'

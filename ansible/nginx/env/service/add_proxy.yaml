@@ -1,0 +1,97 @@
+- name: 检查nginx配置是否存在问题
+  become: yes
+  become_method: sudo
+  shell: nginx -t
+  register: nginx_conf_check_status
+  ignore_errors: true
+
+- name: 检查his地址是否能访问
+  shell: curl {{ server_address }} -m 3 -s -o /dev/null && echo success || echo error
+  register: check_his_server_address
+
+- name: 检查地址是否已映射
+  shell: grep {{ server_address }} /etc/nginx/conf.d/*.conf | wc -l
+  register: server_address_count
+
+- name: Check if the file already exists
+  file:
+    path: /etc/nginx/conf.d/{{ upstream_name }}.conf
+  ignore_errors: true
+  register: check_file
+
+- name: 检查公网地址是否已映射
+  shell: grep {{ server_name }} /etc/nginx/conf.d/*.conf |wc -l
+  register: server_name_count
+
+# 输出提示信息
+- name: nginx语法检查错误,输出提示信息
+  fail:
+    msg: "在 {{ inventory_hostname }} 主机上,通过 nginx -t 检查nginx配置 语法异常."
+  when: nginx_conf_check_status.rc|int != 0
+- name: 第三方地址无法访问,输出提示信息
+  fail:
+    msg: "第三方地址: {{ server_address }} 在 {{ inventory_hostname }}主机无法访问."
+  when: check_his_server_address.stdout == "error"
+- name: 地址已映射,输出提示信息
+  debug:
+    msg: "第三方地址: {{ server_address }} 在 {{ inventory_hostname }}主机上已映射."
+  when: server_address_count.stdout|int > 0 or server_name_count.stdout|int > 0
+
+- block:
+    - name: 正常，新增配置
+      become: yes
+      become_method: sudo
+      blockinfile:
+        path: /etc/nginx/conf.d/{{ upstream_name }}.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK {{server_name}}"
+        create: yes
+        block: |
+          upstream {{ upstream_name }} {
+              server {{server_address}};
+          }
+
+          server {
+              listen {{internal_port}};
+              server_name {{ server_name }};
+              client_max_body_size 500M;
+              charset utf-8;
+              location / {
+                  proxy_redirect off;
+                  proxy_set_header Host $http_host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  default_type application/json;
+                  proxy_pass http://{{ upstream_name }};
+              }
+              access_log /var/log/nginx/{{ upstream_name }}_access.log jsonlog;
+              error_log /var/log/nginx/{{ upstream_name }}_error.log;
+          }
+    # 检查nginx状态
+    - name: 检查nginx配置是否存在问题
+      become: yes
+      become_method: sudo
+      shell: nginx -t
+      register: nginx_check_status
+      ignore_errors: true
+
+    # 根据状态选择是否进行relaod
+    - name: reload
+      become: yes
+      become_method: sudo
+      shell: nginx -s reload
+      register: nginx_reload_status
+      when:
+        - nginx_check_status.rc|int == 0
+
+    - name: delete /etc/nginx/conf.d/{{ upstream_name }}.conf
+      become: yes
+      become_method: sudo
+      shell: rm -rf /etc/nginx/conf.d/{{ upstream_name }}.conf
+      when:
+        - nginx_check_status.rc|int != 0
+  when:
+    - nginx_conf_check_status.rc|int == 0
+    - server_address_count.stdout|int == 0
+    - server_name_count.stdout|int == 0
+    - check_file.state == 'absent'
+    - check_his_server_address.stdout == "success"

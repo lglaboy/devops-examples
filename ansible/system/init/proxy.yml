@@ -1,0 +1,36 @@
+# - name: install nginx proxy ssh_base
+- name: install proxy ssh_base
+  remote_user: swift
+  hosts: proxy_host
+  gather_facts: False
+  vars:
+    AK: XXXXXXXXXXXXXXXXXXXX
+    SK: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  tasks:
+  - name: 检查主机磁盘数量
+    raw: lsblk | grep disk | wc -l
+    register: disk_info
+    tags: check_disk
+  - fail:
+      msg: 主机磁盘数量大于两块，请手动处理
+    when: disk_info.stdout_lines[0] > "1"
+    tags: check_disk
+  - name: set hostname
+    raw:  sudo hostnamectl set-hostname {{ inventory_hostname }}
+  - name: update apt source
+    raw: sudo sed -i.$(date +"%Y%m%d")~ -r "s@http://.*archive.ubuntu.com|http://.*security.ubuntu.com@http://mirrors.aliyun.com@g" /etc/apt/sources.list
+  # - name: scp source file
+  #   local_action:  command scp /home/swift/packages/common.tar {{ inventory_hostname }}:/tmp
+  # - name: install packages
+  #   raw: cd /tmp/ && sudo rm -rf archives && tar -xvf common.tar && cd archives && sudo dpkg -i *.deb
+  #   ignore_errors: True
+  # TODO: 安装htpdata命令
+  - name: sync date
+    raw: sudo htpdate -s -t gateway.xxxxxxxxxxx.com
+  - name: echo crontab
+    raw: (crontab -l;echo '01 * * * * sudo htpdate -s -t gateway.xxxxxxxxxxx.com') |crontab
+  - name: add huawei image key
+    raw: printf {{ AK }} | openssl dgst -binary -sha256 -hmac {{ SK }} | od -An -vtx1 | sed 's/[ \n]//g' | sed 'N;s/\n//'
+    register: LOGING_KEY
+  - name: login huawei
+    raw: docker login -u cn-east-2@{{ AK }} -p {{ LOGING_KEY['stdout_lines'][0] }} swr.cn-east-2.myhuaweicloud.com

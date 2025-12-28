@@ -1,0 +1,24 @@
+# 获取postgresql数据库机器磁盘使用量
+- name: check postgresql /data 磁盘使用量
+  remote_user: swift
+  hosts: check_pg_data_use_host
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_pg_data_use.log
+  tasks:
+    - name: 检查是否存在postgresql进程
+      shell: ps -ef |grep -v grep |grep postgresql -c
+      register: postgresql_register
+      ignore_errors: True
+    - block:
+      - name: 检查/data使用量
+        shell: sudo du -s /data
+        register: data_use_register
+      - name: 查看/data所在磁盘容量
+        #shell: df /data
+        shell: df /data |awk '{if(NR==2)print}'
+        register: data_df_register
+      - name: output info to local
+        #local_action: shell echo "{{ inventory_hostname }}" > "{{ log_file }}_{{ inventory_hostname|lower }}" && echo "{{ postgresql_registe.stdout }}" >> "{{ log_file }}_{{ inventory_hostname|lower }}"
+        local_action: shell echo "{{ inventory_hostname }},{{ data_use_register.stdout }},{{ data_df_register.stdout }}" >> "{{ log_file }}"
+      when: postgresql_register['stdout']|int >= 1

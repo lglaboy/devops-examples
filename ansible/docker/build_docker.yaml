@@ -1,0 +1,73 @@
+# Date: 2024-07-10 14:50
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 打包docker安装包，用于离线安装docker
+# Version: v1.0
+
+
+- name: build offline install docker package
+  hosts: docker_hosts
+  remote_user: swift
+  # 不需要获取主机信息，False 提高速度
+  gather_facts: False
+  tasks:
+    # 获取目标机器codename
+    - name: 获取 codename
+      shell: . /etc/os-release && echo "$VERSION_CODENAME"
+      register: system_codename
+    # 检查目标机器docker是否安装
+    - name: 检查docker是否安装
+      shell: docker version
+      register: docker_version
+      ignore_errors: true
+
+    - block:
+      - name: 检查离线安装包文件是否存在
+        connection: local
+        stat:
+          path: /home/swift/packages/{{ system_codename.stdout }}_docker.tar
+        register: docker_package
+      # 存在退出
+      - fail:
+          msg: "离线安装包：{{ /home/swift/packages/{{ system_codename.stdout }}_docker.tar }} 已存在"
+        when: docker_package.stat.isreg is defined and docker_package.stat.isreg
+
+      # 不存在继续
+      # 检查能否访问互联网
+      - name: check network
+        shell: ping www.baidu.com -c 1 -W 3
+        ignore_errors: true
+        register: network_status
+
+      - fail:
+          msg: "无法访问互联网，无法打包。"
+        when: network_status.rc != 0
+
+      - name: set apt source
+        shell: |
+          # 安装GPG证书
+          curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo apt-key add -
+
+          echo "deb [arch=$(dpkg --print-architecture)] https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/debian "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+          # 下载最新版安装包
+          sudo apt-get update
+
+          # ls /var/cache/apt/archives|grep .deb -c|cat
+
+          sudo rm -rf /var/cache/apt/archives/*.deb
+
+          sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -d -y
+
+          mkdir /tmp/{{ system_codename.stdout }}_docker
+
+          sudo mv /var/cache/apt/archives/*.deb /tmp/{{ system_codename.stdout }}_docker
+
+          cd /tmp && tar -cf {{ system_codename.stdout }}_docker.tar {{ system_codename.stdout }}_docker
+
+
+      - name: scp source file
+        connection: local
+        shell: scp {{ inventory_hostname }}:/tmp/{{ system_codename.stdout }}_docker.tar /home/swift/packages/
+      when:
+        - docker_version.rc != 0

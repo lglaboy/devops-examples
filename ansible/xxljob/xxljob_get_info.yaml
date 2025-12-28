@@ -1,0 +1,72 @@
+# Date: 2023-06-05 10:00
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 获取部署xxljib的信息
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/xxljob_info.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      # 查找所有环境
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      # 指定一附院环境
+      # shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | grep -E -i "JDYFY-" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: xxljob_info_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: get xxljob info
+  hosts: xxljob_info_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/xxljob_info.csv
+  tasks:
+    - name: 检查容器是否存在
+      shell: docker ps | grep -E "xxl-job$|xxljob-mysql$" -c | cat
+      register: xxljob_container
+    - name: 检查连接mysql地址
+      # shell: docker inspect xxl-job | grep xxljob-mysql:3306 -c | cat
+      # docker inspect --format='{{ json .HostConfig.Links }}' xxl-job
+      shell: docker inspect --format='{{ '{{' }} json .HostConfig.Links{{ '}}' }}' xxl-job
+      register: xxljob_links
+      when: xxljob_container['stdout']|int == 2
+
+    - name: 检查连接mysql密码
+      shell: docker inspect xxl-job |grep PARAMS= |awk '{print $3}'| cut -d '=' -f 2
+      register: xxljob_passwd
+      when: xxljob_container['stdout']|int == 2
+
+    - name: 输出信息
+      connection: local
+      shell: echo "{{ inventory_hostname }},存在xxl-job和xxljob-mysql,link,{{xxljob_passwd['stdout']}}" >> "{{ log_file }}"
+      when:
+        - xxljob_container['stdout']|int == 2
+        - xxljob_links['stdout'] != "null"
+    
+    # 输出结果
+    - name: 输出无xxljob容器主机
+      connection: local
+      shell: echo "{{ inventory_hostname }},不存在xxl-job和xxljob-mysql,null,null" >> "{{ log_file }}"
+      when: xxljob_container['stdout']|int != 2
+    - name: 输出有xxljob容器,非link主机
+      connection: local
+      shell: echo "{{ inventory_hostname }},存在xxl-job和xxljob-mysql,非link,{{xxljob_passwd['stdout']}}" >> "{{ log_file }}"
+      when: 
+      - xxljob_container['stdout']|int == 2
+      - xxljob_links['stdout'] == "null"

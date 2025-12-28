@@ -1,0 +1,65 @@
+# Date: 2024-11-14 15:24
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 统计nginx访问地址，检查是否是静态站点
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_log_check.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: nginx_log_check_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: get nginx http http_address
+  hosts: nginx_log_check_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_log_check.csv
+  tasks:
+    - name: 检查目录是否存在
+      stat:
+        path: /var/log/nginx
+      register: nginx_log_path
+
+    - block:
+      - name: 检查日志中是否包含user_id
+        shell: sudo tail /var/log/nginx/*.log /var/log/nginx/*.log.1 -n 100 |grep user_id -c|cat
+        register: nginx_process_status
+
+      - name: 输出http地址到本地
+        connection: local
+        shell: echo "{{ inventory_hostname }},日志中存在user_id" >> "{{ log_file }}"
+        when:
+          - nginx_process_status['stdout']|int > 0
+
+      - name: 输出无日志到本地
+        connection: local
+        shell: echo "{{ inventory_hostname }},日志中不存在user_id" >> "{{ log_file }}"
+        when:
+          - nginx_process_status['stdout']|int == 0
+
+      when: nginx_log_path.stat.isdir is defined and nginx_log_path.stat.isdir
+
+    - name: 输出无日志目录到本地
+      connection: local
+      shell: echo "{{ inventory_hostname }},不存在/var/log/nginx目录" >> "{{ log_file }}"
+      when:
+        - nginx_log_path.stat.isdir is undefined

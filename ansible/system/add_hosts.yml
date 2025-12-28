@@ -1,0 +1,49 @@
+# 添加指定解析
+# 根据指定的环境名查找相关主机，按照指定的 域名 和 IP 进行添加解析
+# 用法 -e env_name="xxxx-prod" -e domain_name="internal-api-gateway.xxxxxxxxxxx.com" -e domain_ip="xxx.xxx.xxx.xxx"
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # 检查变量是否定义
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbook addHost.yml -e env_name='xxxxxxxx-prod' -e domain_name='internal-api-gateway.xxxxxxxxxxx.com' -e domain_ip='xxx.xxx.xxx.xxx'"
+      when: env_name is not defined or domain_name is not defined or domain_ip is not defined
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: env_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+- name: 添加 {{ domain_name }} 域名解析
+  hosts: env_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    hosts_config: "/etc/hosts"
+  tasks:
+    # 判断是否存在
+    - name: 检查解析是否存在
+      shell: grep -v "^#" {{hosts_config}} | grep {{ domain_name }} -c | cat
+      register: check_domain_name
+
+    - name: 不存在，添加解析
+      become: yes
+      become_method: sudo
+      lineinfile:
+        dest: "{{hosts_config}}"
+        line: "{{domain_ip}}    {{domain_name}}"
+      when: check_domain_name.stdout|int == 0
+
+    - name: 已存在
+      debug:
+        msg: "{{domain_name}} 解析已存在"
+      when: check_domain_name.stdout|int > 0

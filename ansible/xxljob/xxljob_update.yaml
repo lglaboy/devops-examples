@@ -1,0 +1,130 @@
+# Date: 2023-06-05 10:00
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新xxljob容器
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/xxljob_update.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      # 查找所有环境
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      # 指定一附院环境
+      # shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | grep -E -i "JDYFY-" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: xxljob_update_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: update xxljob
+  hosts: xxljob_update_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/xxljob_update.csv
+  tasks:
+    - name: 检查容器是否存在
+      shell: docker ps | grep -E "xxl-job$|xxljob-mysql$" -c | cat
+      register: xxljob_container
+    # - name: 检查连接mysql地址
+    #   # shell: docker inspect xxl-job | grep xxljob-mysql:3306 -c | cat
+    #   # docker inspect --format='{{ json .HostConfig.Links }}' xxl-job
+    #   shell: docker inspect --format='{{ '{{' }} json .HostConfig.Links{{ '}}' }}' xxl-job
+    #   register: xxljob_links
+    #   when: xxljob_container['stdout']|int == 2
+    - name: 检查 xxl-job 版本
+      shell: docker ps | grep -E "xxl-job$" |awk '{print $2}'|cut -d ":" -f 2
+      register: xxljob_version
+      when: xxljob_container['stdout']|int == 2
+    - block:
+        # 上传镜像
+        - name: check xxljob image
+          shell: docker images |awk '{print $1":"$2}' | grep -c -E swr.cn-east-2.myhuaweicloud.com/common-server/xxljob:1.3 | cat
+          register: xxljob_image_check
+        - name: wget xxljob image
+          shell: cd /tmp && wget -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/xxljob_1.3.tgz
+          register: xxljob_image_wget
+          ignore_errors: True
+          when: xxljob_image_check['stdout']|int == 0
+
+        - name: upload xxljob image
+          shell: scp /home/swift/packages/xxljob_1.3.tgz {{ inventory_hostname }}:/tmp
+          connection: local
+          when:
+            - xxljob_image_check['stdout']|int == 0
+            - xxljob_image_wget.rc|int != 0
+        - name: load xxljob image
+          shell: docker load < /tmp/xxljob_1.3.tgz
+          when: xxljob_image_check['stdout']|int == 0
+
+        # 获取xxljob端口
+
+        # 获取xxljob密码
+        - name: 检查连接mysql密码
+          shell: docker inspect xxl-job |grep PARAMS= |awk '{print $3}'| cut -d '=' -f 2
+          register: xxljob_passwd
+
+        - name: delete old xxljob
+          shell: docker rm -f xxl-job
+        # password: q1w2e3r4
+        - name: start xxljob
+          shell: |
+            docker run -d --cap-add=SYS_PTRACE \
+            --name xxl-job \
+            --link xxljob-mysql \
+            -p 10116:10116 \
+            -h localhost \
+            -v /opt/xxljob/logs:/data/applogs \
+            -v /etc/localtime:/etc/localtime \
+            --cap-add=SYS_PTRACE \
+            --restart=unless-stopped \
+            --memory-swappiness=0 \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            -e PARAMS="--spring.datasource.url=jdbc:mysql://xxljob-mysql:3306/xxl_job?Unicode=true&useSSL=false&characterEncoding=UTF-8 --spring.datasource.username=root --spring.datasource.password={{xxljob_passwd['stdout']}} --xxl.job.accessToken=8b5c687b81852fcc63a795060ee79d15d66467e0 --server.port=10116 --xxl.job.executor.logretentiondays=15 --xxl.job.logretentiondays=15" \
+            swr.cn-east-2.myhuaweicloud.com/common-server/xxljob:1.3
+        - name: check tempuser user
+          shell: docker exec -i xxljob-mysql mysql -uroot -h 127.0.0.1 -D xxl_job -e "select * from xxl_job_user where username='tempuser';" -N | wc -l
+          register: tempuser_count
+        - name: delete tempuser user
+          shell: docker exec -i xxljob-mysql mysql -uroot -h 127.0.0.1 -D xxl_job -e "DELETE FROM xxl_job_user WHERE username = 'tempuser';"
+          when: tempuser_count['stdout']|int == 1
+        - name: check develop user
+          shell: docker exec -i xxljob-mysql mysql -uroot -h 127.0.0.1 -D xxl_job -e "select * from xxl_job_user where username='develop';" -N | wc -l
+          register: develop_user
+        - name: add develop user
+          shell: docker exec -i xxljob-mysql mysql -uroot -h 127.0.0.1 -D xxl_job -e "insert into xxl_job_user(username,password,role) values('develop',MD5('指定用户密码'),1);"
+          when: develop_user['stdout']|int == 0
+        - name: 输出成功更新主机
+          connection: local
+          shell: echo "{{ inventory_hostname }},xxl-job存在两个容器,已更新(new)" >> "{{ log_file }}"
+      when:
+        - xxljob_container['stdout']|int == 2
+        # - xxljob_links['stdout'] != "null"
+        - xxljob_version['stdout'] != "1.3"
+
+    # 输出结果
+    - name: 输出无xxljob容器主机
+      connection: local
+      shell: echo "{{ inventory_hostname }},主机无xxl-job和xxljob-mysql这两个容器,未更新" >> "{{ log_file }}"
+      when: xxljob_container['stdout']|int != 2
+    - name: 输出有xxljob容器,非link主机
+      connection: local
+      shell: echo "{{ inventory_hostname }},xxl-job存在两个容器,已更新" >> "{{ log_file }}"
+      when:
+        - xxljob_container['stdout']|int == 2
+        - xxljob_version['stdout'] == "1.3"

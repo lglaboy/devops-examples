@@ -1,0 +1,36 @@
+# Date: 2023-04-28 11:50
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 排查可疑进程
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/update_swift_password_list.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*" | awk '{print $NF}' | grep "JDYFY-" | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: check_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: check process
+  hosts: check_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: 判断操作系统
+      shell: ps -eo pid,lstart,etime,cmd|grep " Fri Apr 2"

@@ -1,0 +1,38 @@
+# Date: 2022-11-22 14:47
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 卸载promtail
+# Version: v1.0
+- name: uninstall promtail
+  hosts: promtail_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: Check whether local-loki exists in the /etc/hosts file
+      shell: grep local-loki /etc/hosts -c|cat
+      register: loki_hosts_register
+    - name: Check to see if promtail is installed
+      shell: docker ps |grep "logging-promtail" -c|cat
+      register: promtail_docker_register
+    - name: 检查目录是否存在
+      stat:
+        path: /opt/promtail
+      register: promtail_path
+    - block:
+      - name: 删除promtail容器
+        shell: docker rm -f logging-promtail
+      - block:
+        - name: 删除目录/opt/promtail
+          become: yes
+          become_method: sudo
+          file:
+            path: /opt/promtail
+            state: absent
+        when: promtail_path.stat.isdir is defined
+      - name: 删除/etc/hosts中的local-loki解析
+        become: yes
+        become_method: sudo
+        shell: sed -i '/local-loki$/d;/^# loki$/d' /etc/hosts
+        when: loki_hosts_register['stdout']|int == 1
+      when: 
+        - promtail_docker_register['stdout']|int == 1

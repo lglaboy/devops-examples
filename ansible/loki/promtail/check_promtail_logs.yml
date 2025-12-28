@@ -1,0 +1,80 @@
+# Date: 2025-05-08 16:29
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查promtail日志，是否存在限流问题(Ingestion rate limit exceeded | Per stream rate limit exceeded)
+# Version: v1.0
+
+# 获取主机组
+- name: get host
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/promtail_rate_limit_check.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: grep_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # - debug:
+    #     var: groups
+
+- name: check logs
+  hosts: grep_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/promtail_rate_limit_check.csv
+  tasks:
+    # 两个环境 docker 和 k3s
+    # 1.判断主机是不是k3s，根据是否存在kubectl
+    # 存在kubectl 且 是app-001 的主机，运行kubectl命令查询日志
+    # 存在kubectl 不是app-001的主机 ，输出k3s node 节点
+    # 不存在kubectl的主机，运行docker命令查询logging-promtail日志
+    - name: 检查是不是k3s环境
+      shell: which kubectl
+      register: k3s_check
+      ignore_errors: true
+    - block:
+        - name: 查询日志
+          shell: kubectl -n logging get pods | grep promtail | cut -d " " -f 1 | xargs -I {} -t kubectl -n logging logs --since=24h {} | grep "rate limit exceeded" -c | cat
+          register: k3s_promtail_count
+
+        - name: 输出日志 存在限流
+          local_action: shell echo "{{ inventory_hostname }},k3s,存在限流,{{k3s_promtail_count['stdout']}}" >> "{{ log_file }}"
+          when: k3s_promtail_count['stdout']|int != 0
+        - name: 输出日志 不存在限流
+          local_action: shell echo "{{ inventory_hostname }},k3s,不存在限流,{{k3s_promtail_count['stdout']}}" >> "{{ log_file }}"
+          when: k3s_promtail_count['stdout']|int == 0
+      when:
+        - k3s_check.rc == 0
+        - "'-APP-001' in inventory_hostname"
+
+    - block:
+        - name: 输出日志 k3s node 节点
+          local_action: shell echo "{{ inventory_hostname }},k3s,不检测限流," >> "{{ log_file }}"
+      when:
+        - k3s_check.rc == 0
+        - "'-APP-001' not in inventory_hostname"
+
+    - block:
+        - name: 查询日志
+          shell: docker logs --since $(date "+%FT%T" -d '-1days') logging-promtail | grep "rate limit exceeded" -c | cat
+          register: docker_promtail_count
+
+        - name: 输出日志 存在限流
+          local_action: shell echo "{{ inventory_hostname }},docker,存在限流,{{docker_promtail_count['stdout']}}" >> "{{ log_file }}"
+          when: docker_promtail_count['stdout']|int != 0
+        - name: 输出日志 不存在限流
+          local_action: shell echo "{{ inventory_hostname }},docker,不存在限流,{{docker_promtail_count['stdout']}}" >> "{{ log_file }}"
+          when: docker_promtail_count['stdout']|int == 0
+      when:
+        - k3s_check.rc != 0

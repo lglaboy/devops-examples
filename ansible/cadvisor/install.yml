@@ -1,0 +1,31 @@
+- name: install cadvisor
+  remote_user: swift
+  hosts: cadvisor_host
+  gather_facts: False
+
+  tasks:
+    - name: scp source file
+      copy:
+        src: /home/swift/packages/prometheus/cadvisor.tar
+        dest: /tmp/
+
+    - name: install packages
+      raw: cd /tmp/ && docker load < cadvisor.tar
+
+    - name: start cadvisor
+      raw: |
+        docker run -itd --name cadvisor \
+        --privileged=true \
+        -p 12581:8080 \
+        --cpus 1 -m 1G \
+        --log-opt max-size=512m \
+        --log-opt max-file=3 \
+        --restart=unless-stopped \
+        -v /:/rootfs:ro \
+        -v /var/run:/var/run:rw \
+        -v /sys:/sys:ro \
+        -v /var/lib/docker/:/var/lib/docker:ro \
+        -v /dev/disk/:/dev/disk:ro \
+        swr.cn-east-2.myhuaweicloud.com/common-server/cadvisor
+
+

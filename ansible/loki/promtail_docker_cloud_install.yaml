@@ -1,0 +1,140 @@
+# Date: 2024-4-11 10:36
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 云上安装promtail,收集audit日志，往存储服务日志的正式loki上面传
+# Version: v1.0
+- name: install promtail
+  hosts: promtail_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: Check whether local-loki exists in the /etc/hosts file
+      shell: grep local-loki /etc/hosts -c|cat
+      register: loki_hosts_register
+    - name: Check to see if promtail is installed
+      shell: docker ps |grep "logging-promtail" -c|cat
+      register: promtail_docker_register
+    - name: 检查network是否存在
+      shell: docker network ls|grep logging -c|cat
+      register: loki_network_register
+    - name: 检查目录是否存在
+      stat:
+        path: /opt/promtail
+      register: promtail_path
+    - name: 检查本地目录是否存在
+      connection: local
+      stat:
+        path: "/tmp/{{ inventory_hostname|lower|regex_replace('-(.*)') }}_loki_host"
+      register: loki_host_file_status
+    - block:
+        - name: 检查promtail image是否存在
+          shell: docker images |awk '{print $1":"$2}'|grep -c swr.cn-east-2.myhuaweicloud.com/common-server/promtail:2.6.1|cat
+          register: promtail_image_status
+        - block:
+            - name: copy promtail image to remote_host
+              local_action: shell scp /home/swift/packages/promtail.tgz {{ inventory_hostname }}:/tmp
+            - name: import docker image
+              shell: docker load < /tmp/promtail.tgz
+          when: promtail_image_status['stdout']|int == 0
+        - name: 获取loki IP
+          connection: local
+          shell: cat "/tmp/{{ inventory_hostname|lower|regex_replace('-(.*)') }}_loki_host"
+          register: loki_ip
+        - name: 在/etc/hosts中添加local-loki的解析
+          become: yes
+          become_method: sudo
+          shell: echo "\n# loki\n{{ loki_ip['stdout'] }}    local-loki" | tee -a /etc/hosts
+          when: loki_hosts_register['stdout']|int == 0
+        - name: 更新/etc/hosts中的local-loki解析
+          become: yes
+          become_method: sudo
+          shell: sed -i 's#\(.*\)\(local-loki\)#{{ loki_ip['stdout'] }}    \2#g' /etc/hosts
+          when: loki_hosts_register['stdout']|int == 1
+        - block:
+            - name: 初始化目录
+              file:
+                path: /opt/promtail
+                state: directory
+                mode: 0775
+              # when: promtail_path.stat.isdir is not defined
+            - name: 初始化文件
+              file:
+                path: /opt/promtail/promtail-config.yaml
+                state: touch
+                mode: 0664
+            - name: 初始化文件/opt/promtail/promtail-config.yaml
+              blockinfile:
+                path: /opt/promtail/promtail-config.yaml
+                block: |
+                  server:
+                    http_listen_port: 9080
+                    grpc_listen_port: 0
+
+                  positions:
+                    filename: /mnt/config/positions.yaml
+
+                  clients:
+                    - url: http://local-loki:4100/loki/api/v1/push
+                      external_labels:
+                        hostname: ${HOSTNAME}
+
+                  limits_config:
+                    readline_rate_enabled: true
+                    readline_rate: 4000
+                    readline_burst: 5000
+                    readline_rate_drop: false
+
+                  target_config:
+                    sync_period: "10s"
+
+                  scrape_configs:
+                    - job_name: audit_logs
+                      pipeline_stages:
+                        - match:
+                            selector: '{job="audit_logs"}'
+                            stages:
+                            - regex:
+                                source: filename
+                                expression: '(?P<path>.*)/(?P<file_name>\\S+?)$'
+                            - labels:
+                                file_name:
+                      static_configs:
+                      - targets:
+                          - localhost
+                        labels:
+                          job: audit_logs
+                          host: ${HOSTNAME}
+                          agent: promtail
+                          __path__: /var/log/{auth.log,syslog,kern.log}
+            - name: 初始化文件/opt/promtail/positions.yaml
+              # shell: echo "positions:" > /opt/promtail/positions.yaml && ls -al /opt/*/logs/*.log|awk '{print  "  " $NF ":\ " "\""$5"\""}' >> /opt/promtail/positions.yaml && ls -al /var/log/nginx/*access.log|awk '{print  "  " $NF ":\ " "\""$5"\""}' >> /opt/promtail/positions.yaml
+              shell: echo "positions:" > /opt/promtail/positions.yaml && ls -al /opt/*/logs/*.log|awk '{print  "  " $NF ":" " " "\""$5"\""}' >> /opt/promtail/positions.yaml && ls -al /var/log/nginx/*access.log|awk '{print  "  " $NF ":" " " "\""$5"\""}' >> /opt/promtail/positions.yaml
+          when: promtail_path.stat.isdir is not defined
+          become: yes
+          become_method: sudo
+        # - name: 将logging-loki-gateway加入到bridge
+        #   shell: docker network connect bridge logging-loki-gateway
+        #   when:
+        #     loki_network_register['stdout']|int == 1
+        - name: 启动promtail容器
+          shell: |
+            docker run --name logging-promtail \
+            -h $(hostname) \
+            -itd \
+            --cpus 1 -m 2G \
+            --restart=unless-stopped \
+            --log-opt max-size=512m \
+            --log-opt max-file=3 \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /opt:/opt \
+            -v /var/log:/var/log \
+            -v /opt/promtail:/mnt/config \
+            swr.cn-east-2.myhuaweicloud.com/common-server/promtail:2.6.1 -config.file=/mnt/config/promtail-config.yaml -config.expand-env=true
+        - name: 删除镜像文件
+          file:
+            path: /tmp/promtail.tgz
+            state: absent
+      when:
+        - promtail_docker_register['stdout']|int == 0
+        - loki_host_file_status.stat.isreg is defined

@@ -1,0 +1,36 @@
+# 安装frpc
+- name: install frpc
+  remote_user: swift
+  hosts: install_frpc_host
+  gather_facts: False
+
+  tasks:
+    - name: scp frpc package
+      copy:
+        src: /home/swift/packages/frp/frpc_0.37.1_linux_amd64.tar.gz
+        dest: /tmp/
+
+    # 解压
+    - name: install frpc
+      shell: cd /tmp && sudo tar --no-same-owner -xzvf frpc_0.37.1_linux_amd64.tar.gz && sudo mv frpc_0.37.1_linux_amd64 /etc/frp && sudo chmod a+r /etc/frp/frpc_tls -R
+
+    # 替换frpc.ini中的##HOSTNAME##
+    - name: sed frpc.ini hostname
+      shell: hostname=$(hostname);sudo sed -i 's/##HOSTNAME##/'${hostname}'/g' /etc/frp/frpc.ini
+
+    # 替换frpc.ini中的##ENV_NAME##
+    - name: sed frpc.ini env_name
+      shell: env_name=$(hostname);env_name=${env_name%%-*};env_name=$(echo ${env_name}|tr '[A-Z]' '[a-z]');sudo sed -i 's/##ENV_NAME##/'${env_name}'/g' /etc/frp/frpc.ini
+
+    # 复制frpc.service文件到/lib/systemd/system/
+    - name: add frpc.service
+      shell: sudo mv /etc/frp/systemd/* /lib/systemd/system/ && sudo rm -rf /etc/frp/systemd
+      
+    # 启动服务
+    - name: start frpc
+      shell: sudo systemctl daemon-reload && sudo systemctl start frpc.service && sudo systemctl enable frpc.service
+
+
+    # 开机自启动
+# 测试清理环境
+# sudo systemctl stop frpc.service && sudo systemctl disable frpc.service && sudo rm -rf /lib/systemd/system/frpc* && sudo rm -rf /etc/frp && rm -rf /tmp/frpc_0.37.1_linux_amd64.tar.gz

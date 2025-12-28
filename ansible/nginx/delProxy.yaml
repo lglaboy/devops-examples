@@ -1,0 +1,280 @@
+# delProxy.yaml
+# 关闭映射接口地址
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tags: delete
+  tasks:
+    # 检查变量是否定义
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbook delProxy.yml -e env_name='xxxxxxxx-prod' -e domain_name='http://xxx-xxx-xxxxyy.aliyun-frp.xxxxxxxxxxx.com' [ -e nginx_host='XXXXX-SYNC-001' ] [ -e safe_agent_host='XXXXX-APP-001' ]"
+      when: env_name is not defined or domain_name is not defined
+
+    # 指定nginx主机组
+    - add_host:
+        name: "{{ nginx_host }}"
+        group: nginx_hosts
+      when: nginx_host is defined
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+      when: nginx_host is not defined
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: nginx_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+      when: nginx_host is not defined
+
+    # 指定 safe_agent 主机组
+    - add_host:
+        name: "{{ safe_agent_host }}"
+        group: safe_agent_hosts
+      when: safe_agent_host is defined
+
+    - add_host:
+        name: "{{ env_name.split('-')[0] | upper }}-APP-001"
+        group: safe_agent_hosts
+      when: safe_agent_host is undefined
+
+- name: frpc|safe_agent delete 映射
+  hosts: safe_agent_hosts
+  remote_user: swift
+  gather_facts: False
+  tags: delete
+  vars:
+    frpc_config: "/etc/frp/frpc.ini"
+    safe_agent_config: "/opt/safe_agent/config.conf"
+  tasks:
+    - name: Adjust domain_name
+      set_fact:
+        adjusted_domain_name: "{{ domain_name | regex_replace('(https?://)?([^:/]+)(:[0-9]+)?(.*)', '\\2') }}"
+
+    # 检查frpc进程是否存在
+    - name: check if the frpc process exists
+      shell: systemctl is-active frpc.service
+      ignore_errors: true
+      register: frpc_status
+
+    # frpc 进程不存在，检查safe_agent 进程是否存在
+    - name: check if the safe_agent process exists
+      shell: systemctl is-active safe_agent.service
+      ignore_errors: true
+      register: safe_agent_status
+      when: frpc_status.rc != 0
+
+    # 如果frpc和safe_agent都没有，则直接中断，提示手动指定机器节点
+    - name: 进程不存在，自定义中断
+      fail:
+        msg: "{{ inventory_hostname }} 主机中无frpc和safe_agent。请手动指定机器 -e 'safe_agent_host=XXX-XXX-XXX' "
+      when:
+        - frpc_status.rc != 0
+        - safe_agent_status.rc != 0
+
+    # frpc 环境
+    - block:
+        - name: check {{ adjusted_domain_name }} 是否存在
+          shell: grep "^custom_domains.*{{ adjusted_domain_name }}" {{frpc_config}} -c | cat
+          register: frpc_server_name
+
+        # 关闭映射
+        # 通过 blockinfile 删除通过 addProxy 创建的接口
+        - name: 删除指定配置
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{frpc_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{adjusted_domain_name}}"
+            state: absent
+            backup: yes
+          register: block_delete_status
+          when:
+            - frpc_server_name.stdout|int == 1
+
+        # 非标准安装 指定模式删除
+        - name: delete {{ adjusted_domain_name }} proxy
+          become: yes
+          become_method: sudo
+          replace:
+            path: "{{frpc_config}}"
+            regexp: '(?s)\[[^\]]*\][^\]]*{{ adjusted_domain_name }}.*?\['
+            replace: "["
+            backup: yes
+          register: replace_delete_status
+          when:
+            - frpc_server_name.stdout|int == 1
+            - block_delete_status.changed == false
+
+        # 通过blockinfile和指定模式都未删除,则提示手动删除
+        - name: 删除存在配置失败,手动处理
+          fail:
+            msg: "{{ inventory_hostname }} 主机中通过 blockinfile 或 replace 删除代理配置失败, 请手动处理"
+          when:
+            - frpc_server_name.stdout|int == 1
+            - block_delete_status.changed == false
+            - replace_delete_status.changed == false
+
+        - name: reload config
+          become: yes
+          become_method: sudo
+          shell: systemctl reload frpc
+          when:
+            - frpc_server_name.stdout|int == 1
+            - block_delete_status.changed == true or replace_delete_status.changed == true
+
+        - name: set proxy status variable
+          set_fact:
+            proxy_status: "delete"
+          when:
+            - frpc_server_name.stdout|int == 1
+      when:
+        - frpc_status.rc == 0
+
+    # safe_agent 环境
+    - block:
+        - name: check {{ adjusted_domain_name }} 是否存在
+          shell: grep "^custom_domains.*{{ adjusted_domain_name }}" {{safe_agent_config}} -c |cat
+          register: safe_agent_server_name
+
+        # 关闭映射
+        # 通过 blockinfile 删除通过 addProxy 创建的接口
+        - name: 删除指定配置
+          become: yes
+          become_method: sudo
+          blockinfile:
+            path: "{{safe_agent_config}}"
+            marker: "# {mark} ANSIBLE MANAGED BLOCK {{adjusted_domain_name}}"
+            state: absent
+            backup: yes
+          register: block_delete_status
+          when:
+            - safe_agent_server_name.stdout|int == 1
+
+        - name: delete {{ adjusted_domain_name }} proxy
+          become: yes
+          become_method: sudo
+          replace:
+            path: "{{safe_agent_config}}"
+            regexp: '(?s)\[[^\]]*\][^\]]*{{ adjusted_domain_name }}.*?\['
+            replace: "["
+            backup: yes
+          register: replace_delete_status
+          when:
+            - safe_agent_server_name.stdout|int == 1
+            - block_delete_status.changed == false
+
+        - name: 删除存在配置失败,手动处理
+          fail:
+            msg: "{{ inventory_hostname }} 主机中通过 blockinfile 或 replace 删除代理配置失败, 请手动处理"
+          when:
+            - frpc_server_name.stdout|int == 1
+            - block_delete_status.changed == false
+            - replace_delete_status.changed == false
+
+        - name: reload safe_agent config
+          become: yes
+          become_method: sudo
+          shell: systemctl reload safe_agent
+          when:
+            - safe_agent_server_name.stdout|int == 1
+            - block_delete_status.changed == true or replace_delete_status.changed == true
+
+        # TODO: 是不是proxy_status 的状态定义为要输出的内容，msg，如 配置已删除，地址不存在，地址存在-配置删除失败 等
+        - name: set proxy address variable
+          set_fact:
+            proxy_status: "delete"
+          when:
+            - safe_agent_server_name.stdout|int == 1
+
+      when:
+        - frpc_status.rc != 0
+        - safe_agent_status.rc == 0
+
+- name: nginx delete server_name
+  hosts: nginx_hosts
+  remote_user: swift
+  gather_facts: False
+  tags: delete
+  tasks:
+    - name: Adjust domain_name
+      set_fact:
+        adjusted_domain_name: "{{ domain_name | regex_replace('(https?://)?([^:/]+)(:[0-9]+)?(.*)', '\\2') }}"
+
+    # TODO: 存在新版k3s环境 nginx部署在pod上的情况,后续添加
+
+    # 通过pidof nginx判断不够准确，不能区分nginx.service 和k3s中的pod在节点上运行
+    # 还有一种nginx部署在docker中的情况
+    - name: check if the nginx service process exists
+      shell: systemctl is-active nginx
+      ignore_errors: true
+      register: nginx_status
+
+    - name: check if the nginx docker process exists
+      shell: docker ps | awk '{print $NF}' | grep "^swiftwaf$" -c | cat
+      register: nginx_docker_status
+      when:
+        - nginx_status.rc|int != 0
+
+    - name: 执行service删除剧本
+      include_tasks: env/service/del_proxy.yaml
+      when:
+        - nginx_status.rc|int == 0
+
+    - name: 执行docker删除剧本
+      include_tasks: env/docker/del_proxy.yaml
+      when:
+        - nginx_status.rc|int != 0
+        - nginx_docker_status.stdout|int == 1
+
+    # 输出提示信息
+    - name: nginx进程不存在,输出提示信息
+      debug:
+        msg: "在 {{ inventory_hostname }} 主机上,nginx 进程不存在."
+      when:
+        - nginx_status.rc|int != 0
+        - nginx_docker_status.stdout|int == 0
+
+# 输出结果
+- name: Output Results
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tags: delete
+  tasks:
+    - name: Adjust domain_name
+      set_fact:
+        adjusted_domain_name: "{{ domain_name | regex_replace('(https?://)?([^:/]+)(:[0-9]+)?(.*)', '\\2') }}"
+
+    - name: 输出 agent 关闭映射地址
+      debug:
+        msg: "{{adjusted_domain_name}} 映射地址已从 agent 关闭. 状态: {{ hostvars[groups['safe_agent_hosts'][0]]['proxy_status'] }}"
+      when:
+        - groups['safe_agent_hosts'] | length == 1
+        - hostvars[groups['safe_agent_hosts'][0]]['proxy_status'] is defined
+
+    - name: 输出 agent 不存在的映射地址
+      debug:
+        msg: "{{adjusted_domain_name}} 映射地址在 agent 中不存在."
+      when:
+        - groups['safe_agent_hosts'] | length == 1
+        - hostvars[groups['safe_agent_hosts'][0]].proxy_status is undefined
+
+    - name: 输出 Nginx 关闭映射地址
+      debug:
+        msg: "{{adjusted_domain_name}} 映射地址已从 Nginx 关闭. 状态: {{hostvars[item].nginx_proxy_status}}"
+      when:
+        - hostvars[item].nginx_proxy_status is defined
+        - hostvars[item].nginx_proxy_status == "delete"
+      with_items: "{{ groups['nginx_hosts'] }}"
+
+    - name: 输出 Nginx 不存在的映射地址
+      debug:
+        msg: "{{adjusted_domain_name}} 映射地址在 Nginx 中不存在."
+      when:
+        - hostvars[item].nginx_proxy_status is undefined
+      with_items: "{{ groups['nginx_hosts'] }}"

@@ -1,0 +1,16 @@
+# 安装，升级，部署autoRestart脚本
+- name: install autoRestart
+  hosts: autoRestart_hosts
+  gather_facts: False
+  tasks:
+    - name: Check if the script already exists
+      shell: ls /usr/local/bin/ |grep "^autoRestart$" -c
+      register: number_of_files
+      ignore_errors: yes
+    - name: Backup source files
+      shell: sudo mv /usr/local/bin/autoRestart /usr/local/bin/autoRestart.bak
+      when: number_of_files['stdout']|int >= 1
+    - name: copy autoRestart script to host
+      local_action: shell scp /home/swift/devops/Autoinstall/tools/autoRestart.sh {{ inventory_hostname }}:/tmp
+    - name: install autoRestart
+      shell: sudo mv /tmp/autoRestart.sh /usr/local/bin/autoRestart && sudo chmod 755 /usr/local/bin/autoRestart

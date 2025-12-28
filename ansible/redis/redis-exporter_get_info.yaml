@@ -1,0 +1,73 @@
+# Date: 2023-08-09 14:47
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 获取redis密码，redis-exporter使用密码
+# Version: v1.0
+
+# 多线程批量运行 -f 100
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/redis_and_redis_exporter_password
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}{{log_file_suffix}}"
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{log_file_path}} ];then mv {{log_file_path}} {{log_file_path}}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky|CLOUD|SENTRY" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: get_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+- name: get info
+  hosts: get_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/redis_and_redis_exporter_password
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}{{log_file_suffix}}"
+  tasks:
+    - name: 判断是否存在redis容器
+      shell: docker ps | grep redis | grep -v -E "test|exporter|k8s|sentry" | wc -l
+      register: redis_status
+    - name: 判断是否存在redis-exporter容器
+      shell: docker ps | grep redis_exporter | wc -l
+      register: redis_exporter_status
+    # 获取redis信息
+    - block:
+      - name: 获取redis name
+        shell: docker ps -a |grep redis| grep -v -E "test|exporter|k8s|sentry" |awk '{print $NF}'
+        # ignore_errors: true
+        register: redis_name
+      - name: 获取redis配置文件中的密码
+        shell: grep ^requirepass /opt/{{ redis_name.stdout }}/redis.conf |awk '{print $NF}'
+        # ignore_errors: true
+        register: redis_requirepass
+      - name: 检查配置文件中是否修改了 config 命令
+        shell: grep "^rename-command" /opt/{{ redis_name.stdout }}/redis.conf | grep -i "config" | awk '{print $NF}'
+        register: redis_command_config
+      - name: 输出redis信息
+        local_action: shell echo "{{ inventory_hostname }},{{ redis_name.stdout }},{{redis_command_config.stdout}},{{ redis_requirepass.stdout }}" >> "{{ log_file_path }}"
+      when:
+        - redis_status['stdout']|int > 0
+    # 获取redis-exporter信息
+    - block:
+      - name: get redis_exporter connection redis pg_password
+        shell: docker inspect --format='{{ '{{'  }}.Args{{ '}}' }}' redis_exporter | sed 's/]//g' | awk '{print $NF}'
+        register: redis_exporter_password
+
+      - name: 输出redis_exporter信息
+        connection: local
+        shell: echo "{{ inventory_hostname }},redis_exporter,{{ redis_exporter_password.stdout }},{{ local_redis_info.stdout.split(',')[3] }}" >> "{{ log_file_path }}"
+
+      when:
+        - redis_exporter_status['stdout']|int > 0

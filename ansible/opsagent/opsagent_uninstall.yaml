@@ -1,0 +1,91 @@
+# Date: 2025-10-30 15:35
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 卸载opsagent服务
+# Version: v1.0
+
+# 1.批量卸载
+# ansible-playbook opsagent_uninstall.yml
+# 2.指定单个环境卸载
+# ansible-playbook opsagent_uninstall.yml -e env_name='xxxxxxxx-prod'
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/opsagent:v1
+    local_image_file: opsagent_v1.tgz
+    log_file: /tmp/opsagent_install_info.csv
+    env_name: None
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+    # 获取主机
+    - name: get all hosts
+      shell: |
+        if [ "{{ env_name }}" = "None" ]; then
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+        else
+          grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+        fi
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: tmp_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 卸载 opsagent
+- name: install opsagent
+  hosts: tmp_hosts
+  gather_facts: False
+  vars:
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/opsagent:v1
+    local_image_file: opsagent_v1.tgz
+    log_file: /tmp/opsagent_install_info.csv
+  tasks:
+    # 同时验证docker容器和docker服务是否存在
+    - name: Check to see if opsagent is installed
+      shell: timeout 10 docker ps -a --format {{ '{{' }}.Names{{ '}}' }} | grep -c "^opsagent$" | cat
+      register: container_register
+
+    - block:
+        - name: 删除容器
+          shell: docker rm -f opsagent
+
+        # 删除镜像?镜像可以保留吧，毕竟传包很慢
+        # - name: Check opsagent image
+        #   shell: docker images |awk '{print $1":"$2}' | grep -c "^{{docker_image}}$" | cat
+        #   register: image_register
+
+        # - name: 删除镜像
+        #   shell: docker rmi {{docker_image}}
+        #   when: image_register['stdout']|int == 1
+
+        - name: 删除目录
+          shell: |
+            if test -d /opt/opsagent;then rm -rf /opt/opsagent;fi
+          ignore_errors: true
+          register: delete_dir_status
+
+        - name: 删除目录(root权限)
+          become: yes
+          become_method: sudo
+          shell: |
+            if test -d /opt/opsagent;then rm -rf /opt/opsagent;fi
+          when: delete_dir_status.failed == true
+
+        - name: 输出结果
+          connection: local
+          shell: echo "{{ inventory_hostname }},opsagent 已卸载" >> "{{ log_file }}"
+      when:
+        - container_register['stdout']|int == 1
+
+    - name: 输出结果
+      connection: local
+      shell: echo "{{ inventory_hostname }},opsagent 不存在" >> "{{ log_file }}"
+      when:
+        - container_register['stdout']|int == 0

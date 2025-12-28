@@ -1,0 +1,26 @@
+- name: install postgres_exporter
+  remote_user: swift
+  hosts: install_postgres_exporter
+  gather_facts: False
+
+  tasks:
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbok -i hosts install_postgres_exporter.yml -e pg_user='user' -e pg_password='password' -e pg_address='192.168.1.100:5432'"
+      when: pg_user is not defined or pg_password is not defined or pg_address is not defined
+    - name: Send postgres_exporter image package
+      copy:
+        src: /home/swift/packages/postgres_exporter_v1.tar
+        dest: /tmp/
+
+    - name: load postgres_exporter image package
+      shell: docker load < /tmp/postgres_exporter_v1.tar
+
+    - name: start postgres_exporter
+      # shell: docker run -itd --name postgres_exporter -p 12583:9187 -h $(hostname) -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime --cpus 1 -m 1G --restart=on-failure:3 --log-opt max-size=512m --log-opt max-file=3 -e DATA_SOURCE_NAME="postgresql://{{ pg_user }}:{{ pg_password }}@{{ pg_address }}/postgres?sslmode=disable" swr.cn-east-2.myhuaweicloud.com/common-server/postgres_exporter:v1 
+      shell: docker run -itd --name postgres_exporter -p 12583:9187 -h $(hostname) -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime --cpus 1 -m 1G --restart=on-failure:3 --log-opt max-size=512m --log-opt max-file=3 -e DATA_SOURCE_URI="{{ pg_address }}/postgres?sslmode=disable" -e DATA_SOURCE_USER="{{ pg_user }}" -e DATA_SOURCE_PASS='{{ pg_password }}' swr.cn-east-2.myhuaweicloud.com/common-server/postgres_exporter:v1
+      
+    - name: delete postgres_exporter image package
+      file:
+        path: /tmp/postgres_exporter_v1.tar
+        state: absent

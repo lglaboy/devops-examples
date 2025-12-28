@@ -1,0 +1,91 @@
+- name: install nginx
+  remote_user: swift
+  hosts: waf_host
+  gather_facts: False
+  vars:
+    branch: "master"
+  tasks:
+    - name: Tip
+      debug:
+        msg: "默认安装master分支,安装带lua-resty-waf的分支,请使用 -e branch='origin/develop' 进行安装."
+    - name: git clone source file
+      local_action: raw cd /opt/swiftwaf && git checkout master && git pull && git checkout {{branch}}
+      tags: downloads
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: delete
+      local_action: raw rm -rf /tmp/swiftwaf
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: git clone source file
+      local_action: raw cp -pr /opt/swiftwaf /tmp/
+      tags: downloads
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: delete other file
+      local_action: raw cd /tmp/swiftwaf && rm -rf conf_json/ip/deny.ip
+      tags: downloads
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: sed config
+      command: sed -i 's|lua_code_cache off;|lua_code_cache on;|g' conf/waf.conf
+      tags: downloads
+      delegate_to: localhost
+      register: myoutput
+      changed_when: myoutput.rc
+      args:
+        chdir: /tmp/swiftwaf
+    - name: sed config
+      raw: rm -rf /tmp/swiftwaf/.git
+      tags: downloads
+      delegate_to: localhost
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: tar swiftwaf
+      command: tar -cvf swiftwaf.tar swiftwaf/
+      tags: downloads
+      delegate_to: localhost
+      register: myoutput
+      changed_when: myoutput.rc
+      args:
+        chdir: /tmp/
+    - name: scp source file
+      command: scp /tmp/swiftwaf.tar {{ inventory_hostname }}:/tmp
+      tags: downloads
+      delegate_to: localhost
+      register: myoutput
+      changed_when: myoutput.rc
+    - name: delete
+      command: rm -rf swiftwaf
+      ignore_errors: True
+      register: myoutput
+      changed_when: myoutput.rc
+      args:
+        chdir: /tmp/
+    - name: install nginx base packages-2
+      command: tar -xvf swiftwaf.tar
+      ignore_errors: True
+      register: myoutput
+      changed_when: myoutput.rc
+      args:
+        chdir: /tmp/
+    - name: install WAF-1
+      raw: sudo rm -rf /tmp/swiftwaf.bak && sudo mv /etc/nginx/swiftwaf /tmp/swiftwaf.bak
+      register: myoutput
+      changed_when: myoutput.rc
+      ignore_errors: True
+    - name: install WAF-2
+      raw: sudo cp -pr /tmp/swiftwaf /etc/nginx/
+      register: myoutput
+      changed_when: myoutput.rc
+      ignore_errors: True
+    - name: install WAF-3
+      raw: sudo touch /etc/nginx/swiftwaf/conf_json/ip/deny.ip
+      register: myoutput
+      changed_when: myoutput.rc
+      ignore_errors: True
+    - name: install WAF-3
+      raw: sudo cp -pr /tmp/swiftwaf.bak/conf_json/ip/deny.ip /etc/nginx/swiftwaf/conf_json/ip/
+      register: myoutput
+      changed_when: myoutput.rc
+      ignore_errors: True

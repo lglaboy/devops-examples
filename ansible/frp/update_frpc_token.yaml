@@ -1,0 +1,34 @@
+# 更新frpc token
+# 实例： ansible-playbook -i hosts_frpc update_frpc_token.yaml -e "token=2222222 server_port=7000"
+- name: update frpc token
+  remote_user: swift
+  hosts: frpc_hosts
+  gather_facts: False
+  vars:
+    frps_url: xxx.xxx.xxx.xxx:9090
+    user: username
+    password: password
+
+  tasks:
+    - name: get frps tcp connect
+      local_action: shell curl -u {{ user }}:{{ password }} 'http://{{ frps_url }}/api/proxy/tcp'  -s | tr ',' '\n' |tr '{' '\n'|tr '}' '\n' |grep '"name"\|status'|awk -F '"' '{print $2 " " $4}'|xargs -n 4|column -t|sort -k 4 > /tmp/frps_tcp.log
+    - name: get frps udp connect
+      local_action: shell curl -u {{ user }}:{{ password }} 'http://{{ frps_url }}/api/proxy/udp'  -s | tr ',' '\n' |tr '{' '\n'|tr '}' '\n' |grep '"name"\|status'|awk -F '"' '{print $2 " " $4}'|xargs -n 4|column -t|sort -k 4 > /tmp/frps_udp.log
+    - name: get frps http connect
+      local_action: shell curl -u {{ user }}:{{ password }} 'http://{{ frps_url }}/api/proxy/http'  -s | tr ',' '\n' |tr '{' '\n'|tr '}' '\n' |grep '"name"\|status'|awk -F '"' '{print $2 " " $4}'|xargs -n 4|column -t|sort -k 4 > /tmp/frps_http.log
+    - name: get frps https connect
+      local_action: shell curl -u {{ user }}:{{ password }} 'http://{{ frps_url }}/api/proxy/https'  -s | tr ',' '\n' |tr '{' '\n'|tr '}' '\n' |grep '"name"\|status'|awk -F '"' '{print $2 " " $4}'|xargs -n 4|column -t|sort -k 4 > /tmp/frps_https.log
+    - name: get frps stcp connect
+      local_action: shell curl -u {{ user }}:{{ password }} 'http://{{ frps_url }}/api/proxy/stcp'  -s | tr ',' '\n' |tr '{' '\n'|tr '}' '\n' |grep '"name"\|status'|awk -F '"' '{print $2 " " $4}'|xargs -n 4|column -t|sort -k 4 > /tmp/frps_stcp.log
+    - name: count
+      local_action: shell wc /tmp/frps_* -l
+      register: count
+    - name: debug
+      debug: var=count['stdout_lines']
+    # - name: update frpc token
+    #   shell: sudo sed "/^token.*=/ctoken = {{ token }}" /etc/frp/frpc.ini -i.bak
+    - name: update frpc token
+      shell: sudo sed -e "/^token.*=/ctoken = {{ token }}" -e "/server_port.*=/cserver_port = {{ server_port }}" /etc/frp/frpc.ini -i.bak
+    - name: add restart frpc.service
+      shell: nohup /bin/sh -c 'sleep 3m && sudo systemctl restart frpc.service && sleep 10s && systemctl status frpc.service |grep auto-restart && $(nohup /usr/bin/frpc -c /etc/frp/frpc.ini.bak &> /dev/null &)' > /tmp/frpc.log 2>&1 &
+    # 待定play b，crontab autossh

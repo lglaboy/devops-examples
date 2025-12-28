@@ -1,0 +1,291 @@
+# Date: 2025-08-26 16:03
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新promtail配置文件，增加waf日志收集
+# Version: v1.0
+
+# 获取主机组
+- name: get promtail host
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/promtail_update_log.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: update_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # - debug:
+    #     var: groups
+
+- name: update promtail
+  hosts: update_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/promtail_update_log.csv
+    docker_promtail_file: /opt/promtail/promtail-config.yaml
+    k3s_promtail_file: /home/swift/k3s-yamls/loki/promtail-configmap.yaml
+  tasks:
+    - name: Check to see if promtail is installed
+      # timeout 10 docker ps 仅针对DOCKER卡住，对于主机执行命令卡住无效 timeout也会卡
+      shell: docker ps |grep " logging-promtail$" -c|cat
+      async: 10
+      poll: 5
+      register: promtail_docker_register
+    # docker环境更新
+    - block:
+      - name: 检查promtail配置文件是否存在
+        file:
+          path: "{{docker_promtail_file}}"
+        ignore_errors: true
+        register: check_file
+
+      - name: 检查配置文件中是否已经添加收集waf日志的配置
+        shell: grep "job_name.*waf_log" {{docker_promtail_file}} -c | cat
+        register: promtail_config_status
+        when: check_file.state == 'file'
+
+      - name: 添加收集waf日志的配置
+        blockinfile:
+          path: "{{docker_promtail_file}}"
+          backup: yes
+          marker: "  # {mark} ANSIBLE MANAGED BLOCK waf_log"
+          insertafter: "scrape_configs:"
+          content: |2
+              - job_name: waf_log
+                pipeline_stages:
+                - json:
+                    expressions:
+                      http_host: host
+                - labels:
+                    http_host:
+                - match:
+                    selector: '{job="waf_log"}'
+                    stages:
+                    - regex:
+                        source: filename
+                        expression: '(?P<path>.*)/(?P<file_name>\\S+?)$'
+                    - labels:
+                        file_name:
+                static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: waf_log
+                    host: ${HOSTNAME}
+                    agent: promtail
+                    __path__: /var/log/nginx/{waf.log,waf.log.1}
+        ignore_errors: true
+        register: promtail_config_update_status
+        when:
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+
+      - name: 添加收集waf日志的配置(sudo)
+        become: yes
+        become_method: sudo
+        blockinfile:
+          path: "{{docker_promtail_file}}"
+          backup: yes
+          marker: "  # {mark} ANSIBLE MANAGED BLOCK waf_log"
+          insertafter: "scrape_configs:"
+          content: |2
+              - job_name: waf_log
+                pipeline_stages:
+                - json:
+                    expressions:
+                      http_host: host
+                - labels:
+                    http_host:
+                - match:
+                    selector: '{job="waf_log"}'
+                    stages:
+                    - regex:
+                        source: filename
+                        expression: '(?P<path>.*)/(?P<file_name>\\S+?)$'
+                    - labels:
+                        file_name:
+                static_configs:
+                - targets:
+                    - localhost
+                  labels:
+                    job: waf_log
+                    host: ${HOSTNAME}
+                    agent: promtail
+                    __path__: /var/log/nginx/{waf.log,waf.log.1}
+        ignore_errors: true
+        register: promtail_config_update_status_try2
+        when:
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+          - promtail_config_update_status.failed == true
+
+      - name: promtial更新成功,重启服务
+        shell: docker restart logging-promtail
+        register: docker_restart_status
+        when: 
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+          - promtail_config_update_status.changed or promtail_config_update_status_try2.changed
+
+      - name: 输出 Promtail 状态到 stdout
+        debug:
+          msg: >-
+            {{ '%Y-%m-%d %H:%M:%S' | strftime() }},
+            {{ inventory_hostname }},
+            docker容器logging-promtail{{ (promtail_docker_register['stdout']|int == 1) | ternary('存在','不存在')}},
+            {{docker_promtail_file}}文件{{ (check_file.state == 'file') | ternary('存在','不存在') }},
+            检查waf配置{{ '跳过' if promtail_config_status.skipped | default(false) else '不存在' if promtail_config_status['stdout']|int == 0 else '已存在' }},
+            添加waf配置{{ '跳过' if promtail_config_update_status.skipped | default(false) else '已添加' if promtail_config_update_status.changed | default(false) else '未添加' }},
+            添加waf配置(sudo){{ '跳过' if promtail_config_update_status_try2.skipped | default(false) else '已添加' if promtail_config_update_status_try2.changed | default(false) else '未添加' }},
+            容器重启{{ '跳过' if docker_restart_status.skipped | default(false) else '失败' if docker_restart_status.rc | default(1) != 0 else '成功' }}
+
+      - name: 写入日志文件{{ log_file }}（追加）
+        connection: local
+        shell: >-
+          echo "{{ '%Y-%m-%d %H:%M:%S' | strftime() }},
+          {{ inventory_hostname }},
+          docker容器logging-promtail{{ (promtail_docker_register['stdout']|int == 1) | ternary('存在','不存在')}},
+          {{docker_promtail_file}}文件{{ (check_file.state == 'file') | ternary('存在','不存在') }},
+          检查waf配置{{ '跳过' if promtail_config_status.skipped | default(false) else '不存在' if promtail_config_status['stdout']|int == 0 else '已存在' }},
+          添加waf配置{{ '跳过' if promtail_config_update_status.skipped | default(false) else '已添加' if promtail_config_update_status.changed | default(false) else '未添加' }},
+          添加waf配置(sudo){{ '跳过' if promtail_config_update_status_try2.skipped | default(false) else '已添加' if promtail_config_update_status_try2.changed | default(false) else '未添加' }},
+          容器重启{{ '跳过' if docker_restart_status.skipped | default(false) else '失败' if docker_restart_status.rc | default(1) != 0 else '成功' }}"
+          >> {{ log_file }}
+
+        # shell: echo "{{ inventory_hostname }},docker版本,{{docker_promtail_file}}文件{{(check_file.state == 'file') | ternary('存在', '不存在')}},waf配置{{(promtail_config_status['stdout']|int == 0) | ternary('不','已')}}存在,配置文件{{(promtail_config_update_status.changed)|ternary('已','未')}}更新,容器重启{{'跳过' if docker_restart_status.skipped | default(false) else '失败' if docker_restart_status.rc | default(1) != 0 else '成功' }}" >> "{{ log_file }}"
+
+      when: promtail_docker_register['stdout']|int == 1
+    # k3s环境更新
+    - block:
+      - name: 检查是否是k3s环境
+        file:
+          path: "{{k3s_promtail_file}}"
+        ignore_errors: true
+        register: check_file
+
+      - name: 检查配置文件中是否已经添加收集waf日志的配置
+        shell: grep "job_name.*waf_log" {{k3s_promtail_file}} -c | cat
+        register: promtail_config_status
+        when: check_file.state == 'file'
+
+      - name: 添加收集waf日志的配置
+        blockinfile:
+          path: "{{k3s_promtail_file}}"
+          backup: yes
+          marker: "    # {mark} ANSIBLE MANAGED BLOCK waf_log"
+          insertafter: "scrape_configs:"
+          content: |2
+                - job_name: waf_log
+                  pipeline_stages:
+                  - json:
+                      expressions:
+                        http_host: host
+                  - labels:
+                      http_host:
+                  - match:
+                      selector: '{job="waf_log"}'
+                      stages:
+                      - regex:
+                          source: filename
+                          expression: '(?P<path>.*)/(?P<file_name>\\S+?)$'
+                      - labels:
+                          file_name:
+                  static_configs:
+                  - targets:
+                      - localhost
+                    labels:
+                      job: waf_log
+                      host: ${HOSTNAME}
+                      agent: promtail
+                      __path__: /var/log/nginx/{waf.log,waf.log.1}
+        ignore_errors: true
+        register: promtail_config_update_status
+        when:
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+
+      - name: 添加收集waf日志的配置(sudo)
+        become: yes
+        become_method: sudo
+        blockinfile:
+          path: "{{k3s_promtail_file}}"
+          backup: yes
+          marker: "    # {mark} ANSIBLE MANAGED BLOCK waf_log"
+          insertafter: "scrape_configs:"
+          content: |2
+                - job_name: waf_log
+                  pipeline_stages:
+                  - json:
+                      expressions:
+                        http_host: host
+                  - labels:
+                      http_host:
+                  - match:
+                      selector: '{job="waf_log"}'
+                      stages:
+                      - regex:
+                          source: filename
+                          expression: '(?P<path>.*)/(?P<file_name>\\S+?)$'
+                      - labels:
+                          file_name:
+                  static_configs:
+                  - targets:
+                      - localhost
+                    labels:
+                      job: waf_log
+                      host: ${HOSTNAME}
+                      agent: promtail
+                      __path__: /var/log/nginx/{waf.log,waf.log.1}
+        ignore_errors: true
+        register: promtail_config_update_status_try2
+        when:
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+          - promtail_config_update_status.failed == true
+
+      - name: promtial更新成功,重启服务
+        shell: kubectl apply -f {{k3s_promtail_file}} && kubectl -n logging rollout restart daemonset promtail
+        register: docker_restart_status
+        when: 
+          - check_file.state == 'file'
+          - promtail_config_status['stdout']|int == 0
+          - promtail_config_update_status.changed or promtail_config_update_status_try2.changed
+
+      - name: 输出 Promtail 状态到 stdout
+        debug:
+          msg: >-
+            {{ '%Y-%m-%d %H:%M:%S' | strftime() }},
+            {{ inventory_hostname }},
+            docker容器logging-promtail{{ (promtail_docker_register['stdout']|int == 1) | ternary('存在','不存在')}},
+            {{k3s_promtail_file}}文件{{ (check_file.state == 'file') | ternary('存在','不存在') }},
+            检查waf配置{{ '跳过' if promtail_config_status.skipped | default(false) else '不存在' if promtail_config_status['stdout']|int == 0 else '已存在' }},
+            添加waf配置{{ '跳过' if promtail_config_update_status.skipped | default(false) else '已添加' if promtail_config_update_status.changed | default(false) else '未添加' }},
+            添加waf配置(sudo){{ '跳过' if promtail_config_update_status_try2.skipped | default(false) else '已添加' if promtail_config_update_status_try2.changed | default(false) else '未添加' }},
+            容器重启{{ '跳过' if docker_restart_status.skipped | default(false) else '失败' if docker_restart_status.rc | default(1) != 0 else '成功' }}
+
+      - name: 写入日志文件{{ log_file }}（追加）
+        connection: local
+        shell: >-
+          echo "{{ '%Y-%m-%d %H:%M:%S' | strftime() }},
+          {{ inventory_hostname }},
+          docker容器logging-promtail{{ (promtail_docker_register['stdout']|int == 1) | ternary('存在','不存在')}},
+          {{k3s_promtail_file}}文件{{ (check_file.state == 'file') | ternary('存在','不存在') }},
+          检查waf配置{{ '跳过' if promtail_config_status.skipped | default(false) else '不存在' if promtail_config_status['stdout']|int == 0 else '已存在' }},
+          添加waf配置{{ '跳过' if promtail_config_update_status.skipped | default(false) else '已添加' if promtail_config_update_status.changed | default(false) else '未添加' }},
+          添加waf配置(sudo){{ '跳过' if promtail_config_update_status_try2.skipped | default(false) else '已添加' if promtail_config_update_status_try2.changed | default(false) else '未添加' }},
+          容器重启{{ '跳过' if docker_restart_status.skipped | default(false) else '失败' if docker_restart_status.rc | default(1) != 0 else '成功' }}"
+          >> "{{ log_file }}"
+
+      when: promtail_docker_register['stdout']|int != 1

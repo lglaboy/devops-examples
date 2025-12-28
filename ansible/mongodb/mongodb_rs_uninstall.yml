@@ -1,0 +1,34 @@
+# Date: 2023-04-03 16:06
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 部署mongodb副本集，1主2从，三节点
+# Version: v1.0
+
+
+- name: install mongo Replication
+  remote_user: swift
+  hosts: mongo_rs_host
+#  gather_facts: False
+  tasks:
+  # 判断主机组个数
+  - name: Check the number of host groups
+    fail:
+      msg: "ERROR: 主机数量不等于3,请检查主机组"
+    when:  groups['mongo_rs_host']|length != 3
+  # 清理环境
+  # - name: get mongo name
+  #   shell: grep mongo /etc/hosts |grep $(hostname -I|awk '{print $1}')|awk '{print $NF}'
+  #   register: docker_name
+  # - name: delete env
+  #   shell: docker rm -f {{ docker_name.stdout}} && sudo rm -rf /opt/mongos && sudo sed -i '/local-mongo-00[1-3]/d' /etc/hosts
+  
+  # 不需要依赖变量清理环境
+  - name: delete env docker
+    shell: docker rm -f $(docker ps -a |grep local-mongo|awk '{print $NF}')
+    ignore_errors: true
+  - name: delete env directory
+    shell: sudo rm -rf /opt/mongos
+    ignore_errors: true
+  - name: delete env hosts
+    shell: sudo sed -i '/local-mongo-00[1-3]/d' /etc/hosts
+    ignore_errors: true

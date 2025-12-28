@@ -1,0 +1,281 @@
+# Date: 2023-08-02 11:56
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新postgres-exporter连接数据库 & 更新自定义的查询文件配置queries.yaml
+# Version: v2.0
+
+# 获取主机组
+- name: get host
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/update_postgres_exporter_list
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}{{log_file_suffix}}"
+  tasks:
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: postgres_exporter_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # - debug:
+    #     var: groups
+    - name: 初始化日志文件
+      shell: if [ -f {{log_file_path}} ];then mv {{log_file_path}} {{log_file_path}}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+
+# 对获取得所有主机进行操作
+- name: update postgres_exporter
+  hosts: postgres_exporter_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    pgUser: monitor
+    pgPasswd: 0Ia8eMBK
+    log_file: /tmp/update_postgres_exporter_list
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}{{log_file_suffix}}"
+  tasks:
+    # 判断主机是否有 postgres_exporter 容器
+    - name: Check to see if postgres_exporter is installed
+      shell: docker ps |grep -E "postgres_exporter" -c|cat
+      register: postgres_exporter_docker_register
+    # 判断主机是否有 queries.yaml 配置文件
+    - name: 检查 /opt/postgres-exporter/queries.yaml 是否存在
+      stat:
+        path: /opt/postgres-exporter/queries.yaml
+      register: postgres_exporter_config
+      when: postgres_exporter_docker_register['stdout']|int == 1
+    - block:
+      - name: 检查是否使用blockinfile创建
+        shell: grep "ANSIBLE MANAGED BLOCK queries.yaml" -c /opt/postgres-exporter/queries.yaml | cat
+        register: check_file_maker
+
+      - name: 统计所有自定义查询条目
+        shell: grep -E "^pg_(slave_status|slave_delay_status|slow_sql_cnt|idle_cnt|idle_transaction_cnt|active_cnt|waldir_size|sync_data_cnt)" /opt/postgres-exporter/queries.yaml -c | cat
+        register: postgres_exporter_query_count
+      
+      - name: 检查 postgres_exporter 连接的数据库是否为 local_cloud
+        shell: docker inspect postgres_exporter |grep DATA_SOURCE_NAME |grep local_cloud -c|cat
+        register: postgres_exporter_connect_database
+
+      # 针对非脚本修改配置文件备份
+      - block:
+        - name: 备份源文件
+          shell: mv /opt/postgres-exporter/queries.yaml /opt/postgres-exporter/queries.yaml_$(date +"%F@%T")~
+          register: mv_queries_file_status
+          ignore_errors: true
+        # 权限不足的升级权限
+        - name: 备份源文件(root)
+          become: yes
+          become_user: root
+          shell: mv /opt/postgres-exporter/queries.yaml /opt/postgres-exporter/queries.yaml_$(date +"%F@%T")~
+          when: mv_queries_file_status.rc|int != 0
+        when: check_file_maker['stdout']|int == 0
+      # 更新配置文件
+      - block:
+        - name: 更新文件 /opt/postgres-exporter/queries.yaml
+          blockinfile:
+            path: /opt/postgres-exporter/queries.yaml
+            create: yes
+            backup: yes
+            marker: "# {mark} ANSIBLE MANAGED BLOCK queries.yaml"
+            block: |
+              pg_slave_status:
+                query: "select slot_name as slot_name,active::bool::int as pg_slave_ailve_status  from pg_replication_slots;"
+                master: true
+                metrics:
+                  - slot_name:
+                      usage: "LABEL"
+                      description: "slot_name"
+                  - pg_slave_ailve_status:
+                      usage: "GAUGE"
+                      description: "Master-slave replication, slot1=heat, slot2=cold"
+
+              pg_slave_delay_status:
+                query: "select client_addr as client_addr,client_port as client_port,date_part('epoch',replay_lag) as sec_num from pg_stat_replication;"
+                master: true
+                metrics:
+                  - client_addr:
+                      usage: "LABEL"
+                      description: "client_addr"
+                  - client_port:
+                      usage: "LABEL"
+                      description: "client_port"
+                  - sec_num:
+                      usage: "GAUGE"
+                      description: "Master slave delay time"
+
+              pg_slow_sql_cnt:
+                query: "SELECT count(*) as slow_sql_cnt FROM pg_stat_activity WHERE state <> 'idle' and query not like '%pg_stat_activity%' and query NOT LIKE'%autovacuum%' and (now() - query_start) > interval '0.5 seconds';"
+                master: true
+                metrics:
+                  - slow_sql_cnt:
+                      usage: "GAUGE"
+                      description: "超时sql大于500ms的进程数量"
+
+              pg_idle_cnt:
+                query: "select count(*) as idle_cnt from pg_stat_activity where state='idle' and (query ='COMMIT' or query='SELECT version()');"
+                master: true
+                metrics:
+                  - idle_cnt:
+                      usage: "GAUGE"
+                      description: "commit/select version 的 idle 进程数量"
+
+              pg_idle_transaction_cnt:
+                query: "select count(*) as idle_transaction_cnt from pg_stat_activity where state='idle in transaction'  or state = 'idle in transaction (aborted)';"
+                master: true
+                metrics:
+                  - idle_transaction_cnt:
+                      usage: "GAUGE"
+                      description: "idle in transaction 的 进程数量"
+
+              pg_active_cnt:
+                query: "select count(*) as active_cnt from pg_stat_activity where state='active'"
+                master: true
+                metrics:
+                  - active_cnt:
+                      usage: "GAUGE"
+                      description: "active 的 进程数量"
+
+              pg_waldir_size:
+                query: "SELECT ROUND(SUM(size)/1024/1024/1024, 2) as waldir_size FROM pg_ls_waldir();"
+                master: true
+                metrics:
+                  - waldir_size:
+                      usage: "GAUGE"
+                      description: "wal目录大小"
+
+              pg_sync_data_cnt:
+                query: "select count(*) as sync_cnt from sync_data"
+                master: true
+                metrics:
+                  - sync_cnt:
+                      usage: "GAUGE"
+                      description: "监控sync_data数据量监控"
+          ignore_errors: true
+          register: update_queries_file_status
+        - name: 更新文件 /opt/postgres-exporter/queries.yaml(root)
+          become: yes
+          become_user: root
+          blockinfile:
+            path: /opt/postgres-exporter/queries.yaml
+            create: yes
+            backup: yes
+            marker: "# {mark} ANSIBLE MANAGED BLOCK queries.yaml"
+            block: |
+              pg_slave_status:
+                query: "select slot_name as slot_name,active::bool::int as pg_slave_ailve_status  from pg_replication_slots;"
+                master: true
+                metrics:
+                  - slot_name:
+                      usage: "LABEL"
+                      description: "slot_name"
+                  - pg_slave_ailve_status:
+                      usage: "GAUGE"
+                      description: "Master-slave replication, slot1=heat, slot2=cold"
+
+              pg_slave_delay_status:
+                query: "select client_addr as client_addr,client_port as client_port,date_part('epoch',replay_lag) as sec_num from pg_stat_replication;"
+                master: true
+                metrics:
+                  - client_addr:
+                      usage: "LABEL"
+                      description: "client_addr"
+                  - client_port:
+                      usage: "LABEL"
+                      description: "client_port"
+                  - sec_num:
+                      usage: "GAUGE"
+                      description: "Master slave delay time"
+
+              pg_slow_sql_cnt:
+                query: "SELECT count(*) as slow_sql_cnt FROM pg_stat_activity WHERE state <> 'idle' and query not like '%pg_stat_activity%' and query NOT LIKE'%autovacuum%' and (now() - query_start) > interval '0.5 seconds';"
+                master: true
+                metrics:
+                  - slow_sql_cnt:
+                      usage: "GAUGE"
+                      description: "超时sql大于500ms的进程数量"
+
+              pg_idle_cnt:
+                query: "select count(*) as idle_cnt from pg_stat_activity where state='idle' and (query ='COMMIT' or query='SELECT version()');"
+                master: true
+                metrics:
+                  - idle_cnt:
+                      usage: "GAUGE"
+                      description: "commit/select version 的 idle 进程数量"
+
+              pg_idle_transaction_cnt:
+                query: "select count(*) as idle_transaction_cnt from pg_stat_activity where state='idle in transaction'  or state = 'idle in transaction (aborted)';"
+                master: true
+                metrics:
+                  - idle_transaction_cnt:
+                      usage: "GAUGE"
+                      description: "idle in transaction 的 进程数量"
+
+              pg_active_cnt:
+                query: "select count(*) as active_cnt from pg_stat_activity where state='active'"
+                master: true
+                metrics:
+                  - active_cnt:
+                      usage: "GAUGE"
+                      description: "active 的 进程数量"
+
+              pg_waldir_size:
+                query: "SELECT ROUND(SUM(size)/1024/1024/1024, 2) as waldir_size FROM pg_ls_waldir();"
+                master: true
+                metrics:
+                  - waldir_size:
+                      usage: "GAUGE"
+                      description: "wal目录大小"
+
+              pg_sync_data_cnt:
+                query: "select count(*) as sync_cnt from sync_data"
+                master: true
+                metrics:
+                  - sync_cnt:
+                      usage: "GAUGE"
+                      description: "监控sync_data数据量监控"
+          when: update_queries_file_status.changed == false
+        when: postgres_exporter_query_count['stdout']|int < 8
+      # 更新 postgres_exporter 启动命令
+      - block:
+        # 获取使用镜像名
+        # docker inspect postgres_exporter --format={{.Config.Image}}
+
+        - name: 删除 postgres_exporter 容器
+          shell: docker rm -f postgres_exporter
+
+        # docker run -itd --name postgres_exporter -p 12583:9187 -h $(hostname) -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/postgres-exporter:/opt/postgres-exporter --cpus 1 -m 1G --restart=unless-stopped --log-opt max-size=512m --log-opt max-file=3 -e DATA_SOURCE_NAME="postgresql://monitor:0Ia8eMBK@local-pg-master:5432/local_cloud?sslmode=disable,postgresql://monitor:0Ia8eMBK@local-pg-slave:5432/local_cloud?sslmode=disable" -e PG_EXPORTER_EXTEND_QUERY_PATH=/opt/postgres-exporter/queries.yaml swr.cn-east-2.myhuaweicloud.com/common-server/postgres_exporter:v1
+        - name: start postgres_exporter
+          shell: docker run -itd --name postgres_exporter -p 12583:9187 -h $(hostname) -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/postgres-exporter:/opt/postgres-exporter --cpus 1 -m 1G --restart=unless-stopped --log-opt max-size=512m --log-opt max-file=3 -e DATA_SOURCE_NAME="postgresql://{{ pgUser }}:{{ pgPasswd }}@local-pg-master:5432/local_cloud?sslmode=disable,postgresql://{{ pgUser }}:{{ pgPasswd }}@local-pg-slave:5432/local_cloud?sslmode=disable" -e PG_EXPORTER_EXTEND_QUERY_PATH=/opt/postgres-exporter/queries.yaml swr.cn-east-2.myhuaweicloud.com/common-server/postgres_exporter:v1
+
+        - name: 输出修改记录
+          local_action: shell echo "{{ inventory_hostname }},条件符合,配置已更新,删除并创建" >> "{{ log_file_path }}"
+        when: 
+          - postgres_exporter_connect_database.stdout|int == 0
+      # 重启 postgres-exporter
+      - block:
+        - name: 重启 postgres-exporter
+          shell: docker restart postgres_exporter
+
+        - name: 输出修改记录
+          local_action: shell echo "{{ inventory_hostname }},条件符合,配置已更新,仅重启" >> "{{ log_file_path }}"
+        when: 
+          - postgres_exporter_connect_database.stdout|int == 1
+          - postgres_exporter_query_count['stdout']|int < 8
+      - name: 不需要更新配置及操作容器的
+        local_action: shell echo "{{ inventory_hostname }},条件符合,配置无需更新,容器无需操作" >> "{{ log_file_path }}"
+        when:
+          - postgres_exporter_connect_database.stdout|int == 1
+          - postgres_exporter_query_count['stdout']|int >= 8
+      when: 
+        - postgres_exporter_docker_register['stdout']|int == 1
+        - postgres_exporter_config.stat.isreg is defined
+    - name: 输出未修改记录
+      local_action: shell echo "{{ inventory_hostname }},条件不符,配置未更新,未操作" >> "{{ log_file_path }}"
+      when: (postgres_exporter_docker_register['stdout']|int != 1) or (postgres_exporter_config.stat.isreg is undefined)

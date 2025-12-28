@@ -1,0 +1,59 @@
+# Date: 2023-07-24 11:45
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查redis密码
+# Version: v1.0
+
+# 多线程批量运行 -f 100
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_redis_password_list.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky|CLOUD|SENTRY" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: check_redis_password_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: get redis password
+  hosts: check_redis_password_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_redis_password_list.csv
+  tasks:
+    - name: 判断是否存在redis容器
+      shell: docker ps -a |grep redis| grep -v -E "test|exporter|k8s|sentry" |wc -l
+      register: redis_status
+    - block:
+      - name: 获取redis name
+        shell: docker ps -a |grep redis| grep -v -E "test|exporter|k8s|sentry" |awk '{print $NF}'
+        # ignore_errors: true
+        register: redis_name
+      - name: 获取redis配置文件中的密码
+        shell: grep ^requirepass /opt/{{ redis_name.stdout }}/redis.conf |awk '{print $NF}'
+        # ignore_errors: true
+        register: redis_requirepass
+      - name: 输出redis信息
+        local_action: shell echo "{{ inventory_hostname }},{{ redis_name.stdout }},{{ redis_requirepass.stdout }}" >> "{{ log_file }}"
+      when:
+        - redis_status['stdout']|int > 0
+    # - debug:
+    #     var: update_status
+    - block:
+      - name: 输出没有redis容器的信息
+        local_action: shell echo "{{ inventory_hostname }},无redis,无密码" >> "{{ log_file }}"
+      when: redis_status['stdout']|int == 0

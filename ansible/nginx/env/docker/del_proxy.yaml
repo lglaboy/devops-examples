@@ -1,0 +1,81 @@
+- name: 检查nginx配置是否存在问题
+  become: yes
+  become_method: sudo
+  shell: docker exec swiftwaf nginx -t
+  register: nginx_conf_check_status
+  ignore_errors: true
+
+- name: 检查地址对应文件是否唯一
+  shell: grep -H {{ adjusted_domain_name }} /etc/nginx/conf.d/*.conf | awk -F ":" '{print $1}' | uniq | wc -l
+  register: domain_name_count
+  ignore_errors: true
+
+- name: 获取nginx配置文件名
+  shell: grep -H {{ adjusted_domain_name }} /etc/nginx/conf.d/*.conf | awk -F ":" '{print $1}' | uniq
+  register: domain_name_file
+  ignore_errors: true
+
+# 输出提示信息
+- name: nginx语法检查错误,输出提示信息
+  debug:
+    msg: "在 {{ inventory_hostname }} 主机上,通过 nginx -t 检查nginx配置语法 异常."
+  when: nginx_conf_check_status.rc|int != 0
+
+- name: 域名对应文件不唯一,输出提示信息
+  debug:
+    msg: "在 {{ inventory_hostname }} 主机上,{{ adjusted_domain_name }} 对应文件不唯一."
+  when:
+    - domain_name_count.stdout|int > 1
+
+- name: 地址未映射,输出提示信息
+  debug:
+    msg: "第三方地址: {{ adjusted_domain_name }} 在 {{ inventory_hostname }} 主机 Nginx 上未映射."
+  when: domain_name_file.stdout == ""
+
+- block:
+    - name: 地址映射,进行关闭
+      shell: mv {{ domain_name_file.stdout }} {{ domain_name_file.stdout }}.bak_$(date +%s)
+      become: yes
+      become_method: sudo
+
+    # 检查nginx状态
+    - name: 检查nginx配置是否存在问题
+      become: yes
+      become_method: sudo
+      shell: docker exec swiftwaf nginx -t
+      register: nginx_check_status
+      ignore_errors: true
+
+    # 根据状态选择是否进行relaod
+    - name: reload
+      become: yes
+      become_method: sudo
+      shell: docker exec swiftwaf nginx -s reload
+      register: nginx_reload_status
+      when:
+        - nginx_check_status.rc|int == 0
+
+    - name: set nginx status variable
+      set_fact:
+        nginx_proxy_status: "delete"
+      when:
+        - nginx_check_status.rc|int == 0
+        - nginx_reload_status.rc|int == 0
+
+    - name: set nginx status variable
+      set_fact:
+        nginx_proxy_status: "error"
+      when:
+        - nginx_check_status.rc|int != 0 or nginx_reload_status.rc|int != 0
+
+    # 定义失败，手动处理
+    - name: nginx配置检查异常,自定义中断,手动处理
+      fail:
+        msg: "{{ inventory_hostname }} 主机中nginx配置异常,请手动处理"
+      when:
+        - nginx_check_status.rc != 0
+
+  when:
+    - nginx_conf_check_status.rc|int == 0
+    - domain_name_count.stdout|int == 1
+    - domain_name_file.stdout != ""

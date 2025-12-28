@@ -1,0 +1,16 @@
+# 安装autoheal_exporter_v2
+- name: install autoheal_exporter
+  hosts: autoheal_exporter_hosts
+  gather_facts: False
+  tasks:
+    - name: Check to see if autoheal_exporter is installed
+      shell: docker ps |grep -c autoheal|cat
+      register: autoheal_register
+    - block:
+      - name: copy autoheal_exporter_v2 package to remote_host
+        local_action: shell scp /home/swift/packages/autoheal_exporter_v2.tar {{ inventory_hostname }}:/tmp
+      - name: import docker image
+        shell: docker load < /tmp/autoheal_exporter_v2.tar
+      - name: docker run autoheal_exporter
+        shell: docker run -d --name autoheal_exporter --restart=unless-stopped --log-opt max-size=512m --log-opt max-file=3 -e AUTOHEAL_CONTAINER_LABEL=all -p 12587:8080 -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /var/run/docker.sock:/var/run/docker.sock swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_exporter:v2
+      when: autoheal_register['stdout']|int == 0

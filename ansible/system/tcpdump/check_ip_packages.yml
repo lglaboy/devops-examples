@@ -1,0 +1,53 @@
+# Date: 2024-11-22 11:33
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查一附院所有主机是否有访问指定IP的数据包
+# Version: v1.0
+
+# 根据指定的环境名查找相关主机
+# 用法 -e env_name="xxxx-prod"
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # 检查变量是否定义
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbook check_ip_packages.yml -e env_name='xxxxxxxx-prod'"
+      when: env_name is not defined
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: env_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+- name: 检查 {{ env_name }} 主机的流量包
+  hosts: env_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    hosts_config: "/etc/hosts"
+  tasks:
+    # 判断是否存在
+    - name: 抓包
+      shell: sudo timeout 120 tcpdump -i any host 192.168.9.3 or host 192.168.9.4 -c 1000 -w /tmp/{{inventory_hostname}}_to_9.3_or_9.4.pcap
+      ignore_errors: true
+
+    - name: 查看数据包
+      shell: ls -al /tmp/{{inventory_hostname}}_to_9.3_or_9.4.pcap
+      register: package_status
+
+    - name: check
+      debug:
+        var: package_status.stdout
+
+    # - name: 获取数据包
+    #   connection: local
+    #   shell: scp -o PasswordAuthentication=no {{inventory_hostname}}:/tmp/{{inventory_hostname}}_to_9.3_or_9.4.pcap /tmp/

@@ -1,0 +1,42 @@
+# Date: 2024-09-23 11:00
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 检查系统用户公钥
+# Version: v1.0
+
+# 主机清单配置网段 192.168.1.[1:254]
+
+- name: check user public keys
+  hosts: check_user_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    log_file: /tmp/check_user_list.csv
+  tasks:
+    - name: 判断主机是否存活
+      ping:
+      register: ping_register
+    # 不用判断，能ping通，都是可以正常访问的
+    # - name: debug
+    #   debug:
+    #     var: ping_register
+
+
+    - name: 检查用户公钥
+      become: yes
+      become_method: sudo
+      shell: |
+        for user in $(cat /etc/passwd|grep -v nologin |grep -v sync|grep -v false)
+        do
+          u=$(echo $user |cut -d : -f 1)
+          h=$(echo $user |cut -d : -f 6)
+          if [ -f "$h/.ssh/authorized_keys" ];then
+            cut -d " " -f 3 "$h/.ssh/authorized_keys" | xargs -I {} echo $u,{}
+          fi
+        done
+      register: user_public_key
+
+    - name: check info
+      local_action: shell echo "{{ inventory_hostname }},{{ item }}" >> "{{ log_file }}"
+      with_items:
+        - "{{ user_public_key.stdout_lines }}"

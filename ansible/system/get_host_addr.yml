@@ -1,0 +1,252 @@
+# Date: 2024-01-24 15:05
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 获取 指定主机/环境 信息
+# Version: v1.0
+
+- name: Init env
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    log_dir: /tmp/get_host_info_{{ env_name if env_name is defined else host_name | lower }}
+  tasks:
+    # 检查变量是否存在,需要指定主机,或者环境名
+    - name: 检查变量是否定义
+      fail:
+        msg: "ansible-playbook get_host_addr.yml -e env_name='xxxxxxxx-prod' [ -e host_name='XXXXX-APP-001' ]"
+      when:
+        - env_name is not defined
+        - host_name is not defined
+
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: |
+        if [ -d {{ log_dir }} ];then
+          if [ $(ls {{log_dir}} | wc -l) -gt 0 ];then
+            mv {{ log_dir }} {{ log_dir }}_$(date +"%Y_%m_%d_%H_%M_%S")
+            mkdir -p {{log_dir}}
+          fi
+        else
+          mkdir -p {{log_dir}}
+        fi
+
+    # 创建任务主机组
+    # 单个主机
+    - add_host:
+        name: "{{ host_name }}"
+        group: play_hosts
+      when: host_name is defined
+
+    # 单个环境
+    # 获取该环境主机列表
+    - name: Get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -E -v -i "^#|\*|-TEST-|-DEV-" | awk '{print $NF}' | sort
+      register: grep_hosts
+      when:
+        - host_name is not defined
+        - env_name is defined
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: play_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+      when:
+        - host_name is not defined
+        - env_name is defined
+
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: 获取主机信息
+  hosts: play_hosts
+  remote_user: swift
+  # gather_facts: False
+  vars:
+    # 输出目录
+    log_dir: /tmp/get_host_info_{{ env_name if env_name is defined else host_name | lower }}
+    # 输出主机地址文件
+    host_addr_file: "{{log_dir}}/host_addr.csv"
+    # 输出docker网卡地址文件
+    docker_addr_file: "{{log_dir}}/docker_addr.csv"
+    # 所有端口文件
+    all_port_file: "{{log_dir}}/all_port.csv"
+    # 允许访问端口文件
+    accept_port_file: "{{log_dir}}/accept_port.csv"
+    # docker端口文件
+    docker_port_file: "{{log_dir}}/docker_port.csv"
+    # 该环境按照指定的k3s hosts 配置文件格式输出
+    hosts_config_file: "{{log_dir}}/hosts_config"
+    # 主机端口
+    hosts_port_file: "{{log_dir}}/hosts_port_{{inventory_hostname | lower }}"
+    # ufw 主机层级规则
+    ufw_host_rule: "{{log_dir}}/ufw_host_rule.sh"
+    # ufw port 层级规则
+    ufw_host_port_rule: "{{log_dir}}/ufw_{{inventory_hostname | lower }}_port_rule.sh"
+    internal_access_service_name_list:
+      - "etcd"
+      - "node_exporter"
+      - "flanneld"
+      - "glusterd"
+      - "glusterfsd"
+      - "rpcbind"
+      - "systemd-resolve"
+    global_ports:
+      - 22
+      - 2020
+      - 80
+      - 443
+      - 8080
+    internal_ports:
+      - 53
+      - 5355
+      - 2375
+      - 3100
+      - 12580
+      - 12581
+      - 12582
+      - 12583
+      - 12584
+      - 12585
+      - 12586
+      - 12587
+      - 9090
+      - 2379
+      - 2380
+      - 5460
+      - 5432
+      - 15432
+      - 6379
+      - 6380
+      - 27017
+      - 3306
+      - 3307
+      - 9876
+      - 10911
+      - 10912
+      - 10909
+      - 8180
+      - 10116
+      - 10100
+      - 8848
+      - 9555
+      - 9200
+      - 9300
+      - 9432
+      - 9000
+  tasks:
+    # - name: 输出所有变量
+    #   debug:
+    #     var: hostvars[inventory_hostname]
+    # 循环网卡，排除 veth*/br-*/lo/flannel*/docker0 网卡
+    # {device!~'tap.*|veth.*|br.*|virbr*|lo*'}
+    - name: 输出网卡及IP
+      debug:
+        # msg: "{{item}} {{ansible_facts.{{item|replace('-', '_')}}.ipv4.address}}"
+        msg: "{{item}} {{ vars['ansible_facts'][item|replace('-', '_')]['ipv4']['address'] }}"
+      when:
+        - ansible_facts[item|replace('-', '_')].ipv4.address is defined
+      loop: "{{ansible_facts.interfaces| reject('match', '^(tap|veth|br|virbr|lo|docker|flannel)') | list}}"
+
+    - name: 输出网卡及IP到本地
+      connection: local
+      shell: echo "{{inventory_hostname}},{{item}},{{ vars['ansible_facts'][item|replace('-', '_')]['ipv4']['address'] }}" >> {{host_addr_file}}
+      when:
+        - ansible_facts[item|replace('-', '_')].ipv4.address is defined
+      loop: "{{ansible_facts.interfaces| reject('match', '^(tap|veth|br|virbr|lo)') | list}}"
+
+    - name: 输出docker网卡及IP到本地
+      connection: local
+      shell: echo "{{inventory_hostname}},{{item}},{{ (vars['ansible_facts'][item|replace('-', '_')]['ipv4']['address'] + '/' + vars['ansible_facts'][item|replace('-', '_')]['ipv4']['netmask']) | ipaddr('network/prefix') }}" >> {{docker_addr_file}}
+      when:
+        - ansible_facts[item|replace('-', '_')].ipv4.address is defined
+      loop: "{{ ansible_facts.interfaces | select('match', '^docker') | list}}"
+
+      # 若要转换为 16位掩码，可以通过 ipsubnet(16, 0) 转换
+    - name: 输出 [master] 主机组名
+      shell: echo "[master]" >> {{hosts_config_file}}
+      connection: local
+      run_once: true
+
+    - name: 输出 [master] 主机到hosts格式文件(k3s)
+      connection: local
+      shell: echo "{{inventory_hostname}} NODE_NETWORK={{region}} NODE_IP={{vars['hostvars'][inventory_hostname]['ansible_facts']['default_ipv4']['address']}} NODE_EXTRA_IP=" >> {{hosts_config_file}}
+      vars:
+        region: "{{'external' if 'APP' in inventory_hostname else 'internal' }}"
+
+    - name: Gather facts on listening ports
+      become: yes
+      listen_ports_facts:
+
+    - name: 输出主机所有端口
+      connection: local
+      shell: echo "{{inventory_hostname}},{{ item.name }},{{item.address}},{{item.port}},{{item.protocol}}" >> {{all_port_file}}
+      loop: "{{ ansible_facts.tcp_listen + ansible_facts.udp_listen }}"
+
+    - name: 输出docker映射端口
+      connection: local
+      shell: echo "{{inventory_hostname}},{{ item.name }},{{item.address}},{{item.port}},{{item.protocol}}" >> {{docker_port_file}}
+      when: item.name == "docker-proxy"
+      loop: "{{ ansible_facts.tcp_listen + ansible_facts.udp_listen }}"
+    # 输出ufw规则
+
+    # IP白名单，内网，外网，多网卡，网闸
+    # ufw allow from 192.168.1.107
+    - name: 输出UFW IP白名单规则
+      connection: local
+      shell: echo "#{{inventory_hostname}} {{item}} \nufw allow from {{ vars['ansible_facts'][item|replace('-', '_')]['ipv4']['address'] }}" >> {{ufw_host_rule}}
+      when:
+        - ansible_facts[item|replace('-', '_')].ipv4.address is defined
+      loop: "{{ansible_facts.interfaces| reject('match', '^(tap|veth|br|virbr|lo|docker|flannel)') | list}}"
+
+    # 允许访问端口，ssh，nginx，service，第三方。注意：iptables multiport 最大支持同时15个端口，多的进行切割
+    # ufw allow 22,8083,60103,20001,9096,8109,80,9999,8079,8080,8081,8082,8888/tcp
+    - name: 输出UFW 放开tcp端口规则
+      connection: local
+      shell: echo "#{{inventory_hostname}} {{item.name}} {{item.port}} \nufw allow from {{ item.port }}/tcp" >> {{ufw_host_port_rule}}
+      when:
+        - item.address != '127.0.0.1'
+        - item.port not in internal_ports
+      loop: "{{ ansible_facts.tcp_listen }}"
+
+    - name: 输出UFW全局端口 ssh + http
+      connection: local
+      shell: echo "#{{inventory_hostname}} ssh 22,2020\nufw allow from 22,2020/tcp\n#{{inventory_hostname}} http 80,443,8080\nufw allow from 80,443,8080/tcp" >> {{ufw_host_port_rule}}
+
+    - name: 输出UFW 放开tcp端口规则 结合
+      connection: local
+      shell: echo "#{{inventory_hostname}} {{item}} tcp \nufw allow from {{ item }}/tcp" >> {{ufw_host_port_rule}}
+      vars:
+        accept_port_list: "{{ ansible_facts.tcp_listen | selectattr('address', '!=', '127.0.0.1') | rejectattr('name', 'in', internal_access_service_name_list) | rejectattr('port', 'in', (internal_ports + global_ports)) | map(attribute='port') | unique | sort | list | batch(chunk_size) | map('join', ',') | list }}"
+        chunk_size: 15 # 指定每个子列表的长度
+      loop: "{{ accept_port_list }}"
+
+    - name: 指定格式输出 全局端口
+      connection: local
+      shell: echo "[{{inventory_hostname}}]\n22/2020/80/443/8080" >> {{hosts_port_file}}
+
+    - name: 输出主机允许端口 用于人工检验
+      connection: local
+      shell: echo "{{inventory_hostname}},{{ item.name }},{{item.address}},{{item.port}},{{item.protocol}}" >> {{accept_port_file}}
+      when:
+        - item.port in accept_port_list
+      loop: "{{ ansible_facts.tcp_listen + ansible_facts.udp_listen }}"
+      vars:
+        accept_port_list: "{{ ansible_facts.tcp_listen | selectattr('address', '!=', '127.0.0.1') | rejectattr('name', 'in', internal_access_service_name_list) | rejectattr('port', 'in', (internal_ports + global_ports)) | map(attribute='port') | unique | sort | list }}"
+
+    - name: 指定格式输出 主机端口
+      connection: local
+      shell: echo "{{ item }}" >> {{hosts_port_file}}
+      vars:
+        accept_port_list: "{{ ansible_facts.tcp_listen | selectattr('address', '!=', '127.0.0.1') | rejectattr('name', 'in', internal_access_service_name_list) | rejectattr('port', 'in', (internal_ports + global_ports)) | map(attribute='port') | unique | sort | list | batch(chunk_size) | map('join', '/') | list }}"
+        chunk_size: 15 # 指定每个子列表的长度
+      loop: "{{ accept_port_list }}"
+
+    # docker0 网卡
+    # ufw allow in on docker0
+    - name: 输出UFW 允许docker0网卡规则
+      shell: echo "# docker0\nufw allow in on docker0" >> {{ufw_host_rule}}
+      connection: local
+      run_once: true

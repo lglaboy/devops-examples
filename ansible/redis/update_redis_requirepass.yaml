@@ -1,0 +1,82 @@
+# Date: 2023-08-01 11:11
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 批量修改redis配置文件密码
+# Version: v1.0
+
+# 多线程批量运行 -f 100
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    default_redis_password: "redispassword"
+    log_file: /tmp/update_redis_password_list
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}_{{env_name}}{{log_file_suffix}}"
+  tasks:
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbok update_redis_requirepass.yml -e env_name='xxxxxxxx-prod' [ -e redis_password='redispassword' ]"
+      when: env_name is not defined
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{log_file_path}} ];then mv {{log_file_path}} {{log_file_path}}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: update_redis_password_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    - name: 更新nacos配置
+      local_action: shell tools -t nacos -f update -K redis.password -V {{ redis_password|default(default_redis_password) }} -e {{ env_name }}
+      register: nacos_status
+    # - name: debug
+    #   debug:
+    #     var: nacos_status
+    # msg: "{{nacos_status}}"
+    # # 输出所有主机组
+    # - debug:
+    #     var: groups
+
+- name: update redis config password
+  hosts: update_redis_password_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    default_redis_password: "redispassword"
+    log_file: /tmp/update_redis_password_list
+    log_file_suffix: .csv
+    log_file_path: "{{log_file}}_{{env_name}}{{log_file_suffix}}"
+  tasks:
+    - name: 判断是否存在redis容器
+      shell: docker ps -a |grep redis| grep -v -E "test|exporter|k8s|sentry" |wc -l
+      register: redis_status
+    - block:
+        - name: 获取redis name
+          shell: docker ps -a |grep redis| grep -v -E "test|exporter|k8s|sentry" |awk '{print $NF}'
+          # ignore_errors: true
+          register: redis_name
+        - name: 获取redis配置文件中的密码
+          shell: grep ^requirepass /opt/{{ redis_name.stdout }}/redis.conf |awk '{print $NF}'
+          # ignore_errors: true
+          register: redis_requirepass
+        - name: 修改redis配置文件中的密码
+          shell: sed -i.$(date "+%F@%T")~ "/^requirepass.*/crequirepass {{ redis_password|default(default_redis_password) }}" /opt/{{ redis_name.stdout }}/redis.conf warn=false
+          register: redis_requirepass_update_status
+        # - name: debug
+        #   debug:
+        #     var: redis_requirepass_update_status
+        - name: 输出redis信息
+          local_action: shell echo "{{ inventory_hostname }},{{ redis_name.stdout }},{{ redis_requirepass.stdout }},{{ redis_password|default(default_redis_password) }}" >> "{{ log_file_path }}"
+      when:
+        - redis_status['stdout']|int > 0
+    # - debug:
+    #     var: update_status
+    - block:
+        - name: 输出没有redis容器的信息
+          local_action: shell echo "{{ inventory_hostname }},无redis,无密码,未修改密码" >> "{{ log_file_path }}"
+      when: redis_status['stdout']|int == 0

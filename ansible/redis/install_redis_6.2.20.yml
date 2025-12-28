@@ -1,0 +1,87 @@
+- name: install redis-6.0
+  remote_user: swift
+  hosts: redis_host
+  gather_facts: False
+  vars:
+    download_image_name: redis-6.2.20_docker.tgz
+    docker_image: swr.cn-east-2.myhuaweicloud.com/common-server/redis:6.2.20
+  tasks:
+  # 判断是否安装，根据容器和镜像
+  - name: 检查 redis-6.0 容器是否存在
+    shell: docker ps -a | grep -c " redis-6.0$" | cat
+    register: redis_container_status
+
+  - name: 中止执行（容器已存在）
+    fail:
+      msg: "Redis 容器已存在"
+    when:
+      - redis_container_status['stdout']|int >= 1
+
+  # 端口是否占用
+  - name: 检查端口是否被占用
+    shell: netstat -antp | grep -c ":6379 " | cat
+    register: redis_port_status
+
+  - name: 中止执行（端口已占用）
+    fail:
+      msg: "Redis 端口被占用"
+    when:
+      - redis_port_status['stdout']|int >= 1
+
+  - name: 检查本地文件
+    connection: local
+    stat:
+      path: /tmp/{{download_image_name}}
+    register: image_file_status
+
+  - block:
+    - name: 本地下载镜像
+      local_action: shell docker pull {{docker_image}}
+    - name: 本地打包镜像
+      local_action: shell docker save {{docker_image}} | gzip > /tmp/{{download_image_name}}
+    when:
+    - image_file_status.stat.isreg is undefined
+
+  - name: scp package to remote
+    copy:
+      src: /tmp/{{download_image_name}}
+      dest: /tmp/
+
+  - name: install packages
+    raw: cd /tmp/ && docker load < {{download_image_name}}
+    ignore_errors: True
+  - name: start redis-6.0
+    raw: mkdir /opt/redis-6.0/data/ -p  && mkdir /opt/redis-6.0/logs -p && sudo chmod 777 /opt/redis-6.0/data/ && chmod 777 /opt/redis-6.0/logs
+
+  - name: 创建配置文件
+    copy:
+      dest: /opt/redis-6.0/redis.conf
+      content: |
+        daemonize no
+        pidfile /tmp/redis.pid
+        port 6379
+        bind 0.0.0.0
+        timeout 300
+        loglevel warning
+        logfile /opt/redis-6.0/logs/redis-server.log
+        syslog-enabled no
+        databases 16
+        save 900 1
+        save 300 10
+        save 60 10000
+        rdbcompression yes
+        dir /opt/redis-6.0/data
+        dbfilename dump.rdb
+        requirepass redispassword
+        appendonly no
+        appendfilename appendonly.aof
+        no-appendfsync-on-rewrite no
+        activerehashing yes
+        maxclients 8192 
+        io-threads 4
+        io-threads-do-reads yes
+        rename-command FLUSHALL delflushall
+        rename-command CONFIG conf
+  # 需要添加 --privileged=true  才能启动，否则会提示一些内核参数的问题导致无法启动
+  - name: start redis
+    raw: docker run -itd --name redis-6.0 -h localhost -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /opt/redis-6.0/redis.conf:/etc/redis-6.0/redis.conf -v /opt/redis-6.0/data:/opt/redis-6.0/data -v /opt/redis-6.0/logs:/opt/redis-6.0/logs --net="host"  --cap-add=SYS_PTRACE --restart=unless-stopped --memory-swappiness=0 --log-opt max-size=512m --log-opt max-file=3 --memory-swappiness=0 --privileged=true swr.cn-east-2.myhuaweicloud.com/common-server/redis:6.2.20 /etc/redis-6.0/redis.conf

@@ -1,0 +1,85 @@
+# Date: 2023-02-13 15:53
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新loki的gateway容器，修复漏洞（CVE-2022-41741，CVE-2022-41742），nginx 1.23.1 -> nginx 1.23.3
+# Version: v1.0
+
+# 获取主机组
+- name: get loki host
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: loki_docker_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+    # - debug:
+    #     var: groups
+
+- name: update loki
+  hosts: loki_docker_hosts
+  remote_user: swift
+  gather_facts: False
+  tasks:
+    - name: Check to see if loki is installed
+      shell: docker ps |grep -E "logging-loki-gateway" -c|cat
+      register: loki_docker_register
+    - block:
+      - name: check image version
+        shell: docker ps | grep logging-loki-gateway | grep swr.cn-east-2.myhuaweicloud.com/common-server/nginx:1.23.3 -c | cat
+        register: loki_gateway_version
+      - name: check Map Port
+        shell: docker ps | grep logging-loki-gateway | grep 3100 -c |cat
+        register: loki_gateway_port
+      - block:
+        # 获取新的镜像，能访问外网，访问外网，不能访问外网，scp
+        # - name: pull an image
+        #   docker_image:
+        #     name: swr.cn-east-2.myhuaweicloud.com/common-server/nginx:1.23.3
+        #   register: docker_pull_nginx_status
+        - name: pull an image
+          shell: docker pull swr.cn-east-2.myhuaweicloud.com/common-server/nginx:1.23.3
+          register: docker_pull_nginx_status
+          ignore_errors: true
+        - block:
+          - name: copy loki image to remote_host
+            local_action: shell scp /home/swift/packages/loki_gateway_update.tgz {{ inventory_hostname }}:/tmp
+          - name: import docker image
+            shell: docker load < /tmp/loki_gateway_update.tgz
+          when: docker_pull_nginx_status.rc != 0
+        - name: delete logging-loki-gateway containerd
+          shell: docker rm -f logging-loki-gateway
+        # - name: Remove image
+        #   docker_image:
+        #     state: absent
+        #     name: swr.cn-east-2.myhuaweicloud.com/common-server/nginx
+        #     tag: 1.23.1
+        - name: delete logging-loki-gateway image
+          shell: docker rmi swr.cn-east-2.myhuaweicloud.com/common-server/nginx:1.23.1
+        - name: 启动gateway容器
+          shell: |
+            docker run -itd \
+            --name logging-loki-gateway \
+            --network logging \
+            --network-alias logging-loki-gateway \
+            -p 3100:3100 \
+            --cpus 1 -m 2G \
+            --restart=unless-stopped \
+            --log-opt max-size=512m --log-opt max-file=3 \
+            -v /etc/hosts:/etc/hosts \
+            -v /etc/localtime:/etc/localtime \
+            -v /opt/loki/config/nginx-loki-gateway.conf:/etc/nginx/nginx.conf \
+            -e TZ=Asia/Shanghai \
+            swr.cn-east-2.myhuaweicloud.com/common-server/nginx:1.23.3
+        - name: 将logging-loki-gateway加入到bridge
+          shell: docker network connect bridge logging-loki-gateway
+        when:
+          - loki_gateway_version['stdout']|int == 0
+          - loki_gateway_port['stdout']|int == 1
+      when: loki_docker_register['stdout']|int == 1

@@ -1,0 +1,46 @@
+# Date: 2023-04-21 10:54
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 更新autoheal日志保留策略
+# Version: v1.0
+
+- name: init env
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    log_file: /tmp/nginx_server_name_check.csv
+  tasks:
+    # 初始化日志文件
+    - name: 初始化日志文件
+      shell: if [ -f {{ log_file }} ];then mv {{ log_file }} {{ log_file }}_$(date +"%Y_%m_%d_%H_%M_%S");fi
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep -E -v -i "^#|\*|JENKINS|gitlab|kubevirt|LOCALTEST|LOCAL-DEMO|LOCALDEMO|KR|K3S|K8S|ALIYUN|-DEV-|-TEST|sw|sky" | awk '{print $NF}' | sort
+      register: grep_hosts
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: autoheal_exporter_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+# 更新autoheal_exporter
+- name: update autoheal_exporter
+  hosts: autoheal_exporter_hosts
+  gather_facts: False
+  tasks:
+    - name: Check to see if autoheal_exporter is installed
+      shell: docker ps |grep -c autoheal_exporter|cat
+      register: autoheal_register
+    - name: 检查日志格式
+      shell: docker inspect autoheal_exporter --format='{{ '{{' }}json .HostConfig.LogConfig.Config{{ '}}' }}'|grep max -c|cat
+      register: autoheal_log_config
+      when: autoheal_register['stdout']|int == 1
+    - block:
+      - name: delete autoheal_exporter
+        shell: docker rm -f autoheal_exporter
+      - name: create autoheal_exporter
+        shell: docker run -d --name autoheal_exporter --restart=unless-stopped --log-opt max-size=512m --log-opt max-file=3 -e AUTOHEAL_CONTAINER_LABEL=all -p 12587:8080 -v /etc/hosts:/etc/hosts -v /etc/localtime:/etc/localtime -v /var/run/docker.sock:/var/run/docker.sock swr.cn-east-2.myhuaweicloud.com/common-server/autoheal_exporter:v2
+      when:
+        - autoheal_register['stdout']|int == 1
+        - autoheal_log_config['stdout']|int == 0

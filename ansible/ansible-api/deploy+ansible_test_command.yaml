@@ -1,0 +1,257 @@
+- name: pull_file
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: yes
+  become_user: jenkins
+  become_method: sudo
+  tasks:
+    - name: pull
+      tags: deploy
+      shell: cd /var/lib/jenkins/devops/ && git pull
+
+- name: build_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: build # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+   - name: notified task starting
+     tags: build
+     command: /opt/tools/venv/bin/python /opt/tools/console.py -m alarm -t DingTalkBuild -i {{ job_name }} {{ build_num }} {{ env_name }} {{ node_name }} {{ git_branch }} {{ git_commit }}
+     when: ( env_name.split('-')[-1] == 'prod')
+   - name: build job
+     tags: build
+     command: /var/lib/jenkins/devops/BaseBuild.sh {{ build_dir }} {{ devops_job_dir }} {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }}  {{ default_RegistryUrl }}
+     retries: 2
+     delay: 3
+     register: result
+     until: result.rc == 0
+
+
+# 调用远程api接口部署
+- name: deploy_jobs
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - block:
+      - name: deploy
+        # 需要将没有设置默认的变量全部传递过去，即添加到-e "这里"里面
+        shell: curl -X POST -s '{{ AnsibleApiUrl }}/command' -H 'cache-control:\ no-cache' -d '{ "n":"job1","m":"shell","a":"ansible-playbook -v -i /opt/ansible-api/hosts_ansible_api /opt/ansible-api/remote_deploy_ansible_api.yml -e \"build_dir='{{ build_dir|default(default_build_dir) }}' devops_job_dir='{{ devops_job_dir|default(default_devops_job_dir) }}' env_name='{{ env_name }}' job_name='{{ job_name }}' build_num='{{ build_num }}' JobAction='{{ JobAction }}' JobType='{{ JobType }}' JarPath='{{ JarPath|default(default_JarPath) }}' NodeVersion='{{ NodeVersion|default(default_NodeVersion) }}' envName='{{ envName|default(default_envName) }}' gatwayUrl='{{ gatwayUrl|default(default_gatwayUrl) }}' DockerCpu='{{ DockerCpu|default(default_DockerCpu) }}' DockerMem='{{ DockerMem|default(default_DockerMem) }}' ExposedPort='{{ ExposedPort|default(default_ExposedPort) }}' BaseDir='{{ BaseDir|default(default_BaseDir) }}' PomPath='{{ PomPath|default(default_PomPath) }}' DebugPort='{{ DebugPort|default(default_DebugPort) }}' CheckUrl='{{ CheckUrl|default(default_CheckUrl) }}' CheckTime='{{ CheckTime|default(default_CheckTime) }}' SkyWalking='{{ SkyWalking|default(default_SkyWalking) }}' SkyIP='{{ SkyIP|default(default_SkyIP) }}' RegistryUrl='{{ RegistryUrl|default(default_RegistryUrl) }}' node_name='{{ node_name }}' git_url='{{ git_url }}' git_branch='{{ git_branch }}' git_commit='{{ git_commit }}' jenkins_job_url='{{ jenkins_job_url }}'\"","t":"127.0.0.1","s":"99b2362bb59f930b6232160e079bde50"}'
+        register: check
+      - name: debug stdout
+        set_fact:
+          dataresult: "{{ check.stdout | from_json }}"
+
+      - name: save remote log to local
+        local_action:
+          module: copy
+          content: "{{ dataresult.detail['127.0.0.1'][0]['stdout'] }}"
+          dest: /tmp/{{ env_name }}_{{ job_name }}_{{ build_num }}.log
+      - name: cat remote ansible log
+        shell: cat /tmp/{{ env_name }}_{{ job_name }}_{{ build_num }}.log
+      # 定义失败
+      - fail:
+          msg: "ERROR: 服务升级失败，请查看日志详情。"
+        when: ( dataresult.rc != 0 )
+      when: AnsibleApiUrl is defined
+
+- name: build_jobs
+  tags: deploy
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    default_Action: deploy # build|deploy
+  tasks:
+    - block:
+      - name: data_archiving
+        shell: /opt/tools/venv/bin/python /opt/tools/console.py -m job -t insertjobinfo -i {{ job_name }} {{ env_name }} {{ build_num }} {{ JobType }} {{ Action|default(default_Action) }} swr.cn-east-2.myhuaweicloud.com/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }} {{ git_url }} {{ git_branch }} {{ git_commit }} {{ jenkins_job_url }} {{ groups.remote_host | list | join( ',' )}}_API
+        when: ( dataresult.rc == 0 )
+      when: AnsibleApiUrl is defined
+
+
+
+
+# 正常部署
+- name: downlaod_image
+  hosts: dump_host
+  gather_facts: False
+  vars:
+    JobAction: build # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - block:
+      - name: delete old tar
+        tags: deploy
+        file:
+          path: /tmp/{{ job_name }}.tar
+          state: absent
+        when: ( JobType != 'k8s-java' )
+      - name: download image
+        tags: deploy
+        shell: docker pull {{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }}
+        retries: 2
+        delay: 3
+        register: result
+        until: result.rc == 0
+        when: ( JobType != 'k8s-java' )
+      - name: tar image
+        tags: deploy
+        shell: docker save {{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }} > /tmp/{{ job_name }}.tar
+        retries: 2
+        delay: 3
+        register: result
+        until: result.rc == 0
+        when: ( groups['remote_host'] != groups['dump_host'] ) 
+        ## ---------- 2020.11.12 ---------- ## 
+      - name: check image
+        tags: deploy
+        shell: docker ps -a|grep {{ job_name }}|awk '{print $2}'
+        register: images_is_exist
+      - name: setfacl
+        tags: deploy
+        set_fact:
+          images_is: '{{ images_is_exist.stdout_lines[0] }}'
+        when: images_is_exist.stdout_lines
+      - name: setfacl
+        tags: deploy
+        set_fact:
+          images_is: 'Not exist'
+        when: not images_is_exist.stdout_lines
+      - name: remove image
+        tags: deploy
+        shell: docker rmi  {{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }} 
+        retries: 2
+        delay: 3
+        register: result
+        until: result.rc == 0
+        # when: ( groups['remote_host'] != groups['dump_host']) 
+        # when: (groups['remote_host'] != groups['dump_host'] and 'swr.cn-east-2.myhuaweicloud.com/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }}' != images_is_exist.stdout_lines[0])
+        when:
+              - (groups['remote_host'] != groups['dump_host']) 
+              - ('{{ RegistryUrl|default(default_RegistryUrl) }}/cloudhos/{}/2.0/{}:{}'.format(env_name,job_name,build_num) != images_is)
+      when: AnsibleApiUrl is undefined
+    
+
+- name: deploy_job
+  hosts: remote_host
+  gather_facts: False
+  vars:
+    JobAction: deploy # build|deploy
+    default_JarPath: .
+    default_gatwayUrl: http://local-gateway:8080
+    default_DockerCpu: 2
+    default_DockerMem: 4G
+    default_ExposedPort: "Null"
+    default_NodeVersion: "Null"
+    default_envName: "Null"
+    default_build_dir: "Null"
+    default_devops_job_dir: "Null"
+    default_BaseDir: api
+    default_PomPath: "Null"
+    default_DebugPort: "Null"
+    default_CheckUrl: "Null"
+    default_CheckTime: "3"
+    default_SkyWalking: "Null"
+    default_SkyIP: "local-skywalking"
+    default_RegistryUrl: "swr.cn-east-2.myhuaweicloud.com"
+  tasks:
+    - block:
+      # - fail: 
+      #     msg: "Error Host"
+      #   when: 
+      - name: copy func to remote_host
+        tags: deploy
+        copy: src=/var/lib/jenkins/devops/BaseBuild.sh dest=/tmp/BaseBuild_{{ job_name }}.sh
+        retries: 2
+        delay: 3
+        register: result
+        until: result['failed'] == false
+      - name: dump_host rsync to remote_hosts
+        tags: deploy
+        synchronize:
+          src: /tmp/{{ job_name }}.tar
+          dest: /tmp/{{ job_name }}.tar
+        delegate_to: '{{ item }}'
+        loop: "{{ query('inventory_hostnames', pxe_hosts | default('dump_host')) }}"
+        retries: 2
+        delay: 3
+        register: result
+        until: result.rc == 0
+        when: ( groups['remote_host'] != groups['dump_host']) 
+      - name: chmod script
+        tags: deploy
+        file:
+          path: /tmp/BaseBuild_{{ job_name }}.sh
+          mode: u+x
+      - name: client_script
+        tags: deploy
+        command: /tmp/BaseBuild_{{ job_name }}.sh {{ build_dir|default(default_build_dir) }} {{ devops_job_dir|default(default_devops_job_dir) }}  {{ env_name }} {{ job_name }} {{ build_num }} {{ JobAction }} {{ JobType }} {{ JarPath|default(default_JarPath) }} {{ NodeVersion|default(default_NodeVersion) }} {{ envName|default(default_envName) }} {{ gatwayUrl|default(default_gatwayUrl) }} {{ DockerCpu|default(default_DockerCpu) }} {{ DockerMem|default(default_DockerMem) }} {{ ExposedPort|default(default_ExposedPort) }} {{ BaseDir|default(default_BaseDir) }} {{ PomPath|default(default_PomPath) }} {{ DebugPort|default(default_DebugPort) }} {{ CheckUrl|default(default_CheckUrl) }} {{ CheckTime|default(default_CheckTime) }} {{ SkyWalking|default(default_SkyWalking) }} {{ SkyIP|default(default_SkyIP) }} {{ RegistryUrl|default(default_RegistryUrl) }}
+      - name: remove func
+        tags: deploy
+        file:
+          path: /tmp/BaseBuild_{{ job_name }}.sh
+          state: absent
+      when: AnsibleApiUrl is undefined
+
+- name: build_jobs
+  tags: deploy
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  vars:
+    default_Action: deploy # build|deploy
+  tasks:
+    - block:
+      - name: data_archiving
+        shell: /opt/tools/venv/bin/python /opt/tools/console.py -m job -t insertjobinfo -i {{ job_name }} {{ env_name }} {{ build_num }} {{ JobType }} {{ Action|default(default_Action) }} swr.cn-east-2.myhuaweicloud.com/cloudhos/{{ env_name }}/2.0/{{ job_name }}:{{ build_num }} {{ git_url }} {{ git_branch }} {{ git_commit }} {{ jenkins_job_url }} {{ groups.remote_host | list | join( ',' )}}
+      when: AnsibleApiUrl is undefined

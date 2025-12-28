@@ -1,0 +1,46 @@
+# Date: 2024-11-22 17:03
+# Author: lglaboy
+# GitHub: https://github.com/lglaboy
+# Description: 关闭指定环境定时任务中的周任务和月任务
+# Version: v1.0
+
+# 根据指定的环境名查找相关主机
+# 用法 -e env_name="xxxxyy-prod"
+- name: init hosts
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tasks:
+    # 检查变量是否定义
+    - name: Judge whether the variable is defined
+      fail:
+        msg: "ansible-playbook close_crontab_weekly_monthly.yml -e env_name='xxxxyy-prod'"
+      when: env_name is not defined
+
+    # 获取主机
+    - name: get hosts
+      shell: grep -E "Host\s+" /etc/ssh/ssh_config | grep "{{ env_name.split('-')[0].upper() }}-" | grep -v -E -i "^#|DEV|TEST" | awk '{print $NF}' | sort
+      register: grep_hosts
+
+    # 添加主机到临时主机组
+    - add_host:
+        name: "{{ item }}"
+        group: env_hosts
+      with_items: "{{grep_hosts.stdout_lines}}"
+
+- name: 关闭 {{ env_name }} 主机的定时任务
+  hosts: env_hosts
+  remote_user: swift
+  gather_facts: False
+  vars:
+    hosts_config: "/etc/hosts"
+  tasks:
+    - name: 注释 /etc/crontab
+      shell: sudo sed -i '/^52/ s/^/# /;/^47/ s/^/# /' /etc/crontab
+
+    - name: 修改目录名
+      shell: |
+        if test -d /etc/cron.weekly ;then mv /etc/cron.weekly /etc/cron.weekly.bak;fi
+        if test -d /etc/cron.monthly ;then mv /etc/cron.monthly /etc/cron.monthly.bak;fi
+      become: yes
+      become_user: root

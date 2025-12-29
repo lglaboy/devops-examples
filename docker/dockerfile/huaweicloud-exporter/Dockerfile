@@ -1,0 +1,23 @@
+# 获取华为云监控服务封装
+FROM alpine:3.18.3
+# 维护者信息
+LABEL authors="lglaboy" \
+      description="Obtain Huawei Cloud Monitoring Data"
+
+# 设置时区，需要安装tzdata
+ENV TZ=Asia/Shanghai \
+	GIN_MODE=release
+
+# apk add 提速
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+    && apk add tzdata --no-cache
+
+WORKDIR /
+
+# autoheal 在宿主机上拥有可执行权限，不需要再次授权
+COPY huaweicloud-exporter clouds.yml logs.yml /
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=5s \
+CMD pgrep huaweicloud-exporter || exit 1
+
+ENTRYPOINT ["/huaweicloud-exporter"]

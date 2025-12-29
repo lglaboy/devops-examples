@@ -56,7 +56,7 @@
           shell: docker images |awk '{print $1":"$2}' | grep -c -E swr.cn-east-2.myhuaweicloud.com/common-server/xxljob:1.3 | cat
           register: xxljob_image_check
         - name: wget xxljob image
-          shell: cd /tmp && wget -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/xxljob_1.3.tgz
+          shell: cd /tmp && wget -N --header="Host:static.xxxx-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/xxljob_1.3.tgz
           register: xxljob_image_wget
           ignore_errors: True
           when: xxljob_image_check['stdout']|int == 0

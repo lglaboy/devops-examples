@@ -1,0 +1,18 @@
+# /etc/systemd/system/clash.service
+[Unit]
+Description=Clash Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+
+ExecStartPre=/opt/clash/network-setup.sh start
+ExecStart=/opt/clash/clash -d /opt/clash
+ExecStopPost=/opt/clash/network-setup.sh stop
+
+Restart=always
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

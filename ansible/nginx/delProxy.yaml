@@ -9,7 +9,7 @@
     # 检查变量是否定义
     - name: Judge whether the variable is defined
       fail:
-        msg: "ansible-playbook delProxy.yml -e env_name='xxxxxxxx-prod' -e domain_name='http://xxx-xxx-xxxxyy.aliyun-frp.xxxxxxxxxxx.com' [ -e nginx_host='XXXXX-SYNC-001' ] [ -e safe_agent_host='XXXXX-APP-001' ]"
+        msg: "ansible-playbook delProxy.yml -e env_name='xxxxxxxx-prod' -e domain_name='http://xxx-xxx-xxxxyy.xxxx.xxxxxxxxxxx.com' [ -e nginx_host='XXXXX-SYNC-001' ] [ -e safe_agent_host='XXXXX-APP-001' ]"
       when: env_name is not defined or domain_name is not defined
 
     # 指定nginx主机组

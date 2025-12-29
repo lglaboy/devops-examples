@@ -1,0 +1,20 @@
+- name: Count the number of Grafana alarms
+  remote_user: swift
+  hosts: remote_host
+  gather_facts: False
+  tasks:
+  - name: 传脚本
+    synchronize:
+      src: count_grafana_alerts.sh
+      dest: /tmp/count_grafana_alerts.sh
+      checksum: yes
+  - name: chmod script
+    file:
+      path: /tmp/count_grafana_alerts.sh
+      mode: u+x
+  - name: Execute shell script
+    shell: /tmp/count_grafana_alerts.sh
+  - name: delete script
+    file:
+      path: /tmp/count_grafana_alerts.sh
+      state: absent

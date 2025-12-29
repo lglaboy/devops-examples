@@ -37,7 +37,7 @@
     # 定义 server_name
     - name: Set server_name variable
       set_fact:
-        server_name: "{{ his_name | default('') if his_name is defined else (server_address|hash)[:8] }}-{{ nginx_host.split('-')[0] | lower }}-prod.aliyun-frp.xxxxxxxxxxx.com"
+        server_name: "{{ his_name | default('') if his_name is defined else (server_address|hash)[:8] }}-{{ nginx_host.split('-')[0] | lower }}-prod.xxxx.xxxxxxxxxxx.com"
 
     # TODO: 存在新版k3s环境 nginx部署在pod上的情况,后续添加
 

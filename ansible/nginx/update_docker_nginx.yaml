@@ -33,7 +33,7 @@
     - block:
         # 从云上下载
         # - name: download image for cloud http
-        #   shell: wget -q -N --header="Host:static.cloud-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
+        #   shell: wget -q -N --header="Host:static.xxxx-prod.xxxxxxxxxxx.com" http://xxx.xxx.xxx.xxx/packages/{{download_image_name}} -O /tmp/{{download_image_name}}
         #   delegate_to: "{{ inventory_hostname.split('-')[0] | upper }}-APP-001"
 
         # 从镜像仓库下载
